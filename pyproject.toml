@@ -1,0 +1,85 @@
+[tool.poetry]
+name = "agentic-maps"
+version = "0.1.0"
+description = "Offline-capable, legally-licensed mapping platform: tile harvesting, vector extraction, routing, and a MapLibre rendering runtime."
+authors = ["Michael Ikemann"]
+readme = "README.md"
+packages = [{ include = "agentic_maps" }]
+include = [{ path = "web/**", format = ["sdist", "wheel"] }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = ">=2.7,<3.0"
+httpx = ">=0.27,<0.29"
+# Read-only access to Protomaps regional extracts (vector street/label layer).
+pmtiles = ">=3.2,<4.0"
+# Tile fallback synthesis (parent-crop upscale / children merge) for holes in
+# offline bundles.
+pillow = { version = ">=10.0", optional = true }
+# REST surface + isolated dev server are optional so the core engine stays
+# framework-free (mirrors llming-files: core has no FastAPI dependency).
+fastapi = { version = ">=0.115", optional = true }
+uvicorn = { version = ">=0.30", extras = ["standard"], optional = true }
+# Shared frontend bundle: three.js, Vue, Quasar, fonts. Nothing llming-stage
+# already ships is vendored again in web/vendor — a second three.js is a
+# second version to keep in step. MapLibre and the Protomaps basemap stay
+# local because they are map-specific, not part of the shared bundle.
+llming-stage = { version = ">=0.1.4,<0.2.0", optional = true }
+# WebSocket session plumbing behind the opt-in frontend debug surface, so an
+# agent can inspect a page running on someone else's GPU and pixel ratio.
+llming-com = { version = ">=0.1.7,<0.2.0", optional = true }
+# Server-side screenshot of the live map runtime (agentic_maps/render/,
+# POST /render). Optional: it needs a real headless-Chromium binary
+# (`playwright install chromium`, separate from `pip install`), so the core
+# package and even the REST surface stay usable without it.
+playwright = { version = ">=1.40", optional = true }
+# The official Model Context Protocol SDK — agentic_maps/mcp_server/ exposes
+# the whole capability surface as MCP tools (stdio via `agentic-maps-mcp`,
+# streamable HTTP at /mcp on the dev server). Optional so the core engine
+# and plain REST deployments never carry it.
+mcp = { version = ">=2.0,<3.0", optional = true }
+
+[tool.poetry.extras]
+rest = ["fastapi"]
+fallback = ["pillow"]
+# dev-server/globe/debug pull in llming-stage/llming-com, which are not on
+# public PyPI (both are published there; the note that matters is that this codebase
+# was extracted from). They resolve via editable installs from the private
+# sibling repo, and BOTH require Python >= 3.14 — a 3.11 venv installs
+# rest/fallback fine but silently loses the 3D globe. See
+# docs/development.md. Everyone else installs the core + rest + fallback
+# extras (Python 3.11+ is enough for those).
+dev-server = ["fastapi", "uvicorn", "pillow", "llming-stage", "llming-com"]
+# The 3D globe needs the shared vendor bundle; the flat map does not.
+globe = ["llming-stage"]
+debug = ["llming-com"]
+# `POST /render` needs both `rest` (it is a MapsApi endpoint) and this extra
+# (it drives an actual browser). `playwright install chromium` is a separate,
+# one-time step after `pip install` — see docs/rendering.md.
+render = ["fastapi", "playwright"]
+# MCP toolset (docs/mcp.md): the tools call the REST surface through an
+# in-process ASGI client, so fastapi rides along even for pure-stdio use.
+mcp = ["mcp", "fastapi"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.24"
+
+[tool.poetry.scripts]
+agentic-maps-dev = "agentic_maps.devserver:main"
+# The 2-minute geo server wizard (docs/setup-guide.md) — matches the
+# `agentic-maps-dev` naming pattern above rather than a subcommand, since
+# this package has no single `agentic-maps` root command to hang a
+# subcommand off of.
+agentic-maps-setup = "agentic_maps.setup.wizard:main"
+# The MCP stdio server (docs/mcp.md) — what a claude-code/desktop MCP config
+# points at. Needs the `mcp` extra installed.
+agentic-maps-mcp = "agentic_maps.mcp_server.stdio:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

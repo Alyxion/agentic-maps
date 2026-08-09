@@ -1,0 +1,32 @@
+# Override for `docker compose -f docker-compose.yml -f docker-compose.offline.yml up -d`.
+#
+# Only meaningful AFTER a first "mixed"/"online" run already built the
+# Valhalla graph and imported Nominatim's database into the volumes that
+# base file declares — this file strips every env var that would make
+# either container reach out to the internet again on restart. It does NOT,
+# and cannot, make the FIRST build/import free of internet: that graph
+# build / PBF import has to fetch the source data from somewhere at least
+# once (this is the same "authoring is online, presentation is offline"
+# split docs/concept.md already draws for the rest of the product).
+#
+# `AGENTIC_MAPS_MODE=offline` in .env (set by `agentic-maps-setup` when you
+# pick offline mode) is also what the override below forces directly — no
+# live tile proxy / geocode fallback either, regardless of what `.env` says.
+services:
+  valhalla:
+    environment:
+      - tile_urls=
+      # True = reuse the existing tile.tar and never rebuild, even if the
+      # PBF under ./valhalla_data changed — the whole point offline.
+      - use_tiles_ignore_pbf=True
+      - force_rebuild=False
+
+  nominatim:
+    environment:
+      - PBF_URL=
+      - PBF_PATH=
+      - UPDATE_MODE=none
+
+  agentic-maps-api:
+    environment:
+      - AGENTIC_MAPS_MODE=offline

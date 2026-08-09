@@ -1,0 +1,3830 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>agentic-maps</title>
+<!-- Empty favicon: without it the browser requests /favicon.ico and logs a
+     404 to the console on every load. -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/map.css">
+<style>
+  /* App chrome only — the slide runtime's own styling lives in map.css. */
+  html, body { margin: 0; height: 100%; background: #10151c; overflow: hidden;
+    font-family: 'Helvetica Neue', -apple-system, Arial, sans-serif; }
+  #stage { position: relative; width: 100vw; height: 100vh; }
+  #map { position: absolute; inset: 0; }
+  /* The globe sits above the flat map and cross-fades with it; the space
+     behind it is the deep navy of the global-locations view. */
+  .am-globe { position: absolute; inset: 0; width: 100%; height: 100%; display: none; background: #000a1e; transition: opacity 120ms linear; }
+  .am-globe-labels { position: absolute; inset: 0; pointer-events: none; display: none; overflow: hidden; }
+  /* Dark ink inside a white halo, the way Google sets names over both terrain
+     and imagery — white-on-black reads as a glow and fights the globe. */
+  /* display:none until the globe has actually placed one. A div defaults to
+     block, so every name that had never been selected yet was being rendered
+     at the layer's origin — that is the pile of labels in the top-left corner,
+     not a projection error. */
+  .am-globe-label { display: none;
+    position: absolute; left: 0; top: 0; white-space: nowrap; color: #1f2733;
+    transition: opacity 260ms ease;
+    text-shadow: 0 0 2px #fff, 0 0 3px #fff, 1px 0 2px #fff, -1px 0 2px #fff,
+                 0 1px 2px #fff, 0 -1px 2px #fff; }
+  .am-globe-label--country { font: 600 8.5px 'Helvetica Neue', Arial, sans-serif;
+    letter-spacing: 0.07em; text-transform: uppercase; }
+  .am-globe-label--city { font: 500 8px 'Helvetica Neue', Arial, sans-serif; color: #33404f; }
+  /* Open water, set the way an atlas and Google both do it: a muted blue-grey,
+     letter-spaced, wrapped to a narrow column and centred, with no halo — the
+     name should sit in the sea rather than on top of it. */
+  .am-globe-label--ocean {
+    font: 400 8.5px 'Helvetica Neue', Arial, sans-serif;
+    color: #6d8ba3; letter-spacing: 0.16em; text-align: center;
+    white-space: normal; max-width: 62px; line-height: 1.35;
+    text-shadow: 0 0 3px rgba(255,255,255,0.55);
+  }
+  /* Overlay billboards on the globe: mirrored pins/pings/chips plus the one
+     total-duration badge per route, projected + limb-culled like the labels.
+     The wrapper only positions; the cloned element keeps its own styling. */
+  .am-globe-billboards { position: absolute; inset: 0; pointer-events: none; }
+  .am-globe-billboard { position: absolute; left: 0; top: 0;
+    pointer-events: none; will-change: transform; }
+  .am-globe-route-badge { display: inline-flex; }
+
+  .card {
+    background: rgba(255,255,255,0.97); border-radius: 10px;
+    box-shadow: 0 6px 22px rgba(0,0,0,0.28); color: #1f2733;
+  }
+  button, input, select { font-family: inherit; }
+
+  /* App chrome is UI, not copy: no accidental text selection while
+     clicking/dragging around — search panel, layers control, corner
+     cluster, zoom/tilt cards, context menu, the whole nav HUD, sim card
+     and the developer panel alike. Inputs and selects stay selectable. */
+  #search-panel, #layers-control, #corner-cluster, #zoom, #tilt, #locate,
+  #devmode, #map-menu, #stops, #times, #status, #stop-suggest,
+  #nav-banner, #nav-bottom, #nav-sim, #nav-recenter, #nav-arrival,
+  #nav-side, #nav-attrib-wrap, #nav-route-options, #dev {
+    -webkit-user-select: none; user-select: none; }
+  input, textarea, select { -webkit-user-select: auto; user-select: auto; }
+
+  /* -- search + route, top left (the Google-Maps corner) -------------- */
+  #search-panel { position: absolute; top: 12px; left: 12px; z-index: 12; width: 360px; max-width: 46vw; }
+  .search-row { display: flex; align-items: center; padding: 6px 8px 6px 12px; gap: 8px; }
+  .search-row input {
+    flex: 1; border: 0; outline: none; font-size: 15px; color: #1f2733;
+    background: transparent; padding: 8px 0;
+  }
+  .icon-btn {
+    border: 0; background: transparent; cursor: pointer; font-size: 16px;
+    color: #5b6a7d; padding: 6px 8px; border-radius: 6px; line-height: 1;
+  }
+  .icon-btn:hover { background: rgba(0,0,0,0.06); }
+  .icon-btn.active { background: #1f2733; color: #fff; }
+  #results { border-top: 1px solid #e4e8ee; max-height: 46vh; overflow-y: auto; display: none; }
+  #results.open { display: block; }
+  .result {
+    padding: 9px 12px; cursor: pointer; display: flex; gap: 10px; align-items: center;
+    border-bottom: 1px solid #f0f2f5; font-size: 14px;
+  }
+  .result:hover { background: #f2f6fb; }
+  /* Kind ICON instead of the old "ORT"/"STRASSE" text chip: buildings for
+     cities, a signpost for streets, a globe for countries, map-pin default. */
+  .result .ric { width: 18px; height: 18px; color: #5b6a7d; flex: none; display: flex; }
+  .result .ric svg { width: 100%; height: 100%; }
+  .result .r-body { flex: 1; min-width: 0; }
+  .result .r-body b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result .sub { display: block; font-size: 12px; color: #7b8798;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result .dist { margin-left: auto; font-size: 12px; color: #7b8798; white-space: nowrap; padding-left: 10px; flex: none; }
+
+  /* Stop-field autocomplete: the same ranked dropdown as the main search
+     box, floated under the active stop input (positioned by JS relative to
+     #search-panel, the positioned ancestor of the route panel). */
+  #stop-suggest { position: absolute; z-index: 30; display: none;
+    max-height: 42vh; overflow-y: auto; }
+  #stop-suggest.open { display: block; }
+
+  /* Subtle in-viewport marker for open search suggestions. */
+  .am-suggest-dot { width: 12px; height: 12px; border-radius: 50%;
+    background: #2a6fd6; border: 2px solid #fff; box-sizing: border-box;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.35); opacity: 0.85; }
+
+  /* Magnifier ahead of the field, the way every map search looks. */
+  .search-glyph { color: #5b6a7d; display: flex; align-items: center; flex: none; }
+
+  /* Comfortable inner padding, Google-style — the content must not run
+     against the card border. The steps list below aligns to the same inset. */
+  #route-panel { margin-top: 8px; padding: 12px 16px 14px; display: none; }
+  #route-panel.open { display: block; }
+
+  /* -- place detail card: docked under the search box, Google's compact
+     result card — name, address with ZIP, coordinates, route shortcuts. -- */
+  #place-card { margin-top: 8px; padding: 14px 16px; display: none; }
+  #place-card.open { display: block; }
+  .pc-head { display: flex; align-items: flex-start; gap: 8px; }
+  .pc-name { font-size: 17px; font-weight: 600; color: #1f2733; }
+  .pc-kind { font-size: 11.5px; color: #7b8798; text-transform: uppercase;
+    letter-spacing: .05em; margin-top: 2px; }
+  .pc-head .icon-btn { margin-left: auto; flex: none; }
+  .pc-address { font-size: 13px; color: #2b3543; margin-top: 8px; }
+  .pc-coords { font-size: 11.5px; color: #98a4b3; margin-top: 3px; }
+  .pc-actions { display: flex; gap: 8px; margin-top: 12px; }
+  .pc-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+
+  /* Inline Phosphor icons (fetched from /_stage, fill="currentColor"). */
+  .ph-icon { display: inline-flex; width: 16px; height: 16px; flex: none; }
+  .ph-icon svg { width: 100%; height: 100%; }
+
+  /* -- mode tabs across the top of the directions panel ---------------- */
+  #mode-tabs { display: flex; justify-content: space-around; gap: 2px;
+    border-bottom: 1px solid #eef1f5; padding-bottom: 8px; margin-bottom: 10px; }
+  .mode-tab { border: 0; background: none; cursor: pointer; display: flex;
+    flex-direction: column; align-items: center; gap: 3px; padding: 2px 8px;
+    color: #5b6a7d; border-radius: 8px; }
+  .mode-tab:hover { background: rgba(0,0,0,0.04); }
+  .mode-tab .mt-icon { width: 32px; height: 32px; border-radius: 999px;
+    display: flex; align-items: center; justify-content: center; }
+  .mode-tab .mt-icon svg { width: 18px; height: 18px; }
+  .mode-tab.active { color: #1f2733; }
+  .mode-tab.active .mt-icon { background: #1f2733; color: #fff; }
+  .mode-tab .mt-time { font-size: 11px; color: #7b8798; font-variant-numeric: tabular-nums; }
+  .mode-tab.active .mt-time { color: #1f2733; font-weight: 600; }
+  .mode-tab:disabled { opacity: .45; cursor: default; }
+
+  /* Stops list + the swap control beside it (2-stop trips only). */
+  .stops-wrap { display: flex; align-items: center; gap: 4px; }
+  .stops-wrap #stops-list { flex: 1; min-width: 0; }
+  #btn-swap { flex: none; }
+  #btn-swap[hidden] { display: none; }
+  .route-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; position: relative; }
+  /* Stop glyphs, Google-style: outline circle for start, map pin for the
+     destination — icons, not a colour code. The dotted connector between
+     consecutive rows is drawn by the ::after of every non-last row. */
+  .route-row span.stop-glyph { width: 16px; height: 16px; flex: none; color: #5f6a78; }
+  .route-row span.stop-glyph svg { width: 16px; height: 16px; display: block; }
+  .route-row:not(:last-child) span.stop-glyph::after {
+    content: ''; position: absolute; left: 7px; top: 22px; height: 10px;
+    border-left: 2px dotted #c3cad4; }
+  .route-row input {
+    flex: 1; border: 1px solid #dfe4ea; border-radius: 7px; padding: 7px 9px; font-size: 13px; outline: none;
+  }
+  .route-row .drop { border: 0; background: none; color: #98a4b3; cursor: pointer; font-size: 15px; padding: 2px 4px; }
+  .route-row .drop:hover { color: #e2574c; }
+  /* Drag-to-reorder: the dragged row dims, the hovered row shows an
+     insertion line on the half the drop would land in. */
+  .route-row span.stop-glyph { cursor: grab; }
+  .route-row.dragging { opacity: .45; }
+  .route-row.drag-over { box-shadow: 0 -2px 0 0 #2a6fd6; }
+  .route-row.drag-over-after { box-shadow: 0 2px 0 0 #2a6fd6; }
+  .link-btn { border: 0; background: none; color: #2a6fd6; font-size: 13px; cursor: pointer; padding: 2px 0 8px; }
+
+  #route-options { display: none; border-top: 1px solid #eef1f5; margin-top: 8px; padding-top: 8px; }
+  #route-options.open { display: block; }
+  #route-options .opt { display: flex; align-items: center; gap: 7px; font-size: 13px;
+    color: #2b3543; margin-bottom: 5px; }
+  #route-options .opt input[type=time] { border: 1px solid #dfe4ea; border-radius: 6px; padding: 3px 6px; }
+  #route-options .hint { font-size: 11.5px; color: #7b8798; line-height: 1.45; margin-top: 4px; }
+  #units-opt { flex-wrap: wrap; }
+  #units-opt label { display: inline-flex; align-items: center; gap: 4px; margin-right: 4px; }
+
+  /* Turn-by-turn, Google's shape: glyph | instruction | "41 Sek. (160 m)".
+     Rows and section headers sit flush with the panel's content inset; the
+     right padding keeps the scrollbar off the text while scrolling. */
+  #route-steps { display: none; max-height: 34vh; overflow-y: auto; margin-top: 8px;
+    border-top: 1px solid #eef1f5; padding-right: 8px; }
+  #route-steps.open { display: block; }
+  .step { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0;
+    border-bottom: 1px solid #f4f6f9; font-size: 13px; color: #2b3543; }
+  .step:last-child { border-bottom: 0; }
+  .step .glyph { flex: none; width: 22px; height: 22px; color: #46596e; }
+  .step .glyph svg { width: 22px; height: 22px; }
+  .step .step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .step .step-sub { font-size: 12px; color: #7b8798; }
+  .step-leg { font-size: 12px; letter-spacing: .05em; text-transform: uppercase;
+    color: #7b8798; padding: 12px 0 4px; }
+  /* Multi-stop legs carry place names — mixed case, plus the colour chip
+     that ties the section to its line on the map. */
+  .step-leg.named { text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+  .leg-chip { display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+    margin-right: 7px; vertical-align: -1px; border: 1px solid rgba(0,0,0,0.22); }
+
+  /* Right-click menu on the map: an iconed card, Google-informed. */
+  #map-menu { position: absolute; z-index: 15; display: none; padding: 6px 0; min-width: 232px; }
+  #map-menu.open { display: block; }
+  #map-menu button { display: flex; align-items: center; gap: 10px; width: 100%;
+    text-align: left; border: 0; background: none;
+    padding: 8px 14px; font-size: 13px; color: #1f2733; cursor: pointer; }
+  #map-menu button:hover { background: #f2f6fb; }
+  #map-menu button .ph-icon { width: 16px; height: 16px; color: #5b6a7d; flex: none; }
+  #map-menu .menu-sep { border-top: 1px solid #eef1f5; margin: 4px 0; }
+  /* Coordinates header IS a button: click copies them to the clipboard. */
+  #menu-coord { font-size: 12px; color: #7b8798; font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid #eef1f5; margin-bottom: 4px; padding: 7px 14px 9px; }
+  #menu-coord:hover { color: #2a6fd6; }
+  #map-menu #menu-coord .ph-icon { width: 14px; height: 14px; }
+  .route-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  .route-actions select { border: 1px solid #dfe4ea; border-radius: 7px; padding: 6px; font-size: 13px; }
+  .btn {
+    background: #1f2733; color: #fff; border: 0; border-radius: 7px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+  }
+  .btn.ghost { background: #eef1f5; color: #2b3543; }
+  #route-result { margin-top: 8px; font-size: 13px; color: #2b3543; display: none; }
+  #route-result.open { display: block; }
+  #route-result b { font-size: 16px; }
+
+  /* Alternates, Google's route rows: dimmed lines on the map (map.js), one
+     row each here — mode icon, "über X", duration bold-green, distance.
+     Clicking a non-selected row swaps it to the primary route. */
+  #route-alternates { display: block; margin-top: 8px; }
+  .alt-row { display: flex; align-items: center; gap: 10px; padding: 9px 6px;
+    border-top: 1px solid #f0f2f5; cursor: pointer; border-radius: 8px; }
+  .alt-row:hover { background: #f7f9fb; }
+  .alt-row.active { background: #f2f6fb; cursor: default; }
+  .alt-row .ar-icon { flex: none; width: 20px; height: 20px; color: #46596e; display: flex; }
+  .alt-row .ar-icon svg { width: 20px; height: 20px; }
+  .alt-row .ar-via { flex: 1; min-width: 0; font-size: 13px; color: #2b3543;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Primary label: the brief PLACE version ("über Pforzheim"); the road
+     version ("über A 8") is demoted to the secondary line beneath it. */
+  .alt-row .ar-place { display: block; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; }
+  .alt-row .ar-road { display: block; font-size: 12px; color: #7b8798;
+    overflow: hidden; text-overflow: ellipsis; }
+  .alt-row .ar-metrics { flex: none; text-align: right; }
+  .alt-row .ar-metrics b { display: block; color: var(--nav-panel-accent, #2b4d7d); font-size: 14px;
+    font-variant-numeric: tabular-nums; }
+  .alt-row .ar-metrics span { font-size: 12px; color: #7b8798; }
+
+  /* -- layers control (Google-style) + theme toggle, top right -------- */
+  /* The big button is a mini map tile previewing the view you would switch
+     TO; a small layers glyph + label badge sits in its lower edge. Click
+     opens the picker card below. */
+  #layers-control { position: absolute; top: 12px; right: 12px; z-index: 14;
+    display: flex; align-items: flex-start; gap: 8px; }
+  #btn-theme { width: 38px; height: 38px; border: 0; border-radius: 10px;
+    cursor: pointer; background: rgba(255,255,255,0.97); color: #2b3543;
+    box-shadow: 0 6px 22px rgba(0,0,0,0.28);
+    display: flex; align-items: center; justify-content: center; }
+  #btn-theme:hover { background: #ffffff; }
+  #btn-theme svg { width: 17px; height: 17px; display: block; }
+  #layers-btn { position: relative; width: 76px; height: 76px; padding: 0;
+    border: 2px solid #ffffff; border-radius: 12px; cursor: pointer;
+    overflow: hidden; box-shadow: 0 6px 22px rgba(0,0,0,0.28);
+    background-color: #dfe4ea; background-image: var(--layers-thumb, none);
+    background-size: cover; background-position: center; color: #fff; }
+  #layers-btn .lb-badge { position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+    padding: 10px 4px 3px; font-size: 10px; font-weight: 600; color: #fff;
+    background: linear-gradient(transparent, rgba(0,0,0,0.66));
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6); pointer-events: none; }
+  #layers-btn .lb-badge .ph-icon { width: 12px; height: 12px; }
+  /* Narrow viewports degrade to a plain icon button — no thumbnail. */
+  #layers-btn .lb-icon { display: none; }
+  @media (max-width: 640px) {
+    #layers-btn { width: 38px; height: 38px; border: 0; border-radius: 10px;
+      background-image: none !important; background-color: rgba(255,255,255,0.97);
+      color: #2b3543; }
+    #layers-btn .lb-badge { display: none; }
+    #layers-btn .lb-icon { display: flex; width: 18px; height: 18px; margin: 0 auto; }
+  }
+  /* The picker: "Kartentyp", one labeled thumbnail per mode. The grid is
+     built from a config array (LAYER_TILES) so future entries — Verkehr,
+     Gelände, ÖPNV … — are one more entry, not new markup. */
+  #layers-picker { position: absolute; top: 88px; right: 0; display: none;
+    padding: 12px 14px; }
+  #layers-picker.open { display: block; }
+  #layers-picker .lp-head { font-size: 13px; font-weight: 600; color: #1f2733;
+    margin-bottom: 10px; white-space: nowrap; }
+  #layers-grid { display: flex; gap: 10px; }
+  .lp-tile { border: 0; background: none; padding: 0; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+    font-size: 11.5px; color: #2b3543; font-family: inherit; }
+  .lp-tile .lp-thumb { width: 64px; height: 64px; border-radius: 10px;
+    border: 2px solid transparent; background-size: cover;
+    background-position: center; background-color: #dfe4ea; box-sizing: border-box; }
+  .lp-tile:hover .lp-thumb { border-color: #b9c6d6; }
+  .lp-tile.active { color: #1a73e8; font-weight: 600; }
+  .lp-tile.active .lp-thumb { border-color: #1a73e8; }
+
+  /* -- lower-LEFT corner cluster: theme toggle + settings gear ---------- */
+  /* Vertical stack of cards; the top right keeps only the layers control.
+     The gear's menu opens upward, anchored to the cluster. */
+  #corner-cluster { position: absolute; left: 12px; bottom: 40px; z-index: 13;
+    display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  #settings { position: relative; }
+  #settings-toggle {
+    width: 38px; height: 38px; border: 0; border-radius: 10px; cursor: pointer;
+    background: rgba(255,255,255,0.97); color: #2b3543;
+    box-shadow: 0 6px 22px rgba(0,0,0,0.28);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #settings-toggle:hover { background: #ffffff; }
+  #settings-toggle .ph-icon { width: 18px; height: 18px; }
+  #settings-menu { display: none; position: absolute; left: 0; bottom: 46px;
+    padding: 12px 14px; min-width: 230px; }
+  #settings-menu.open { display: block; }
+  .settings-head { display: flex; align-items: center; justify-content: space-between;
+    font-size: 13px; font-weight: 600; color: #1f2733; margin-bottom: 10px; }
+  .settings-label { font-size: 11.5px; color: #7b8798; text-transform: uppercase;
+    letter-spacing: .06em; margin-bottom: 6px; }
+  #mode-switch { display: flex; padding: 3px; gap: 2px; background: #eef1f5; border-radius: 8px; }
+  #mode-switch button {
+    flex: 1; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px;
+    font-size: 13px; color: #2b3543; cursor: pointer;
+  }
+  #mode-switch button.active { background: #1f2733; color: #fff; }
+  #lang { width: 100%; border: 1px solid #dfe4ea; border-radius: 7px;
+    background: #fff; font-size: 13px; color: #2b3543; padding: 7px 8px;
+    cursor: pointer; outline: none; box-sizing: border-box; }
+
+  /* -- locate me, bottom right, just above zoom ---------------------- */
+  #locate { position: absolute; right: 12px; bottom: 180px; z-index: 12; overflow: hidden; }
+  #locate button {
+    border: 0; background: transparent; width: 38px; height: 38px; cursor: pointer;
+    color: #2b3543; display: flex; align-items: center; justify-content: center;
+  }
+  #locate button:hover { background: rgba(0,0,0,0.06); }
+  #locate button.active { color: #2a6fd6; }
+
+  /* -- zoom, bottom right ------------------------------------------- */
+  #zoom { position: absolute; right: 12px; bottom: 92px; z-index: 12; display: flex; flex-direction: column; overflow: hidden; }
+  #zoom button { border: 0; background: transparent; width: 38px; height: 38px; font-size: 19px; cursor: pointer; color: #2b3543; }
+  #zoom button + button { border-top: 1px solid #e4e8ee; }
+
+  /* -- developer-mode toggle, lower right below the zoom cluster ------ */
+  /* The developer entrance stays deliberately quiet — small and faded
+     until hovered; it is a workbench door, not app chrome. Same navy
+     surface family as the nav HUD (owner: "give button same style color"). */
+  #devmode { position: absolute; right: 12px; bottom: 44px; z-index: 12; overflow: hidden;
+    background: var(--nav-surface); opacity: 0.55; transition: opacity .15s ease; }
+  #devmode:hover, #devmode:focus-within { opacity: 1; }
+  #devmode button { border: 0; background: transparent; width: 34px; height: 34px;
+    cursor: pointer; color: var(--nav-surface-ink); display: flex; align-items: center;
+    justify-content: center; }
+  #devmode button:hover { background: rgba(255,255,255,0.12); }
+  #devmode button.active { color: var(--nav-accent); }
+  #devmode .ph-icon { width: 16px; height: 16px; }
+
+  /* -- 3D tilt + compass, stacked above locate ------------------------ */
+  #tilt { position: absolute; right: 12px; bottom: 232px; z-index: 12;
+    display: flex; flex-direction: column; overflow: hidden; }
+  #tilt button { border: 0; background: transparent; width: 38px; height: 38px;
+    cursor: pointer; color: #2b3543; font-size: 13px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; }
+  #tilt button + button { border-top: 1px solid #e4e8ee; }
+  #tilt button:hover { background: rgba(0,0,0,0.06); }
+  #tilt button.active { color: #2a6fd6; }
+  /* The needle turns live with the bearing; the transition smooths the
+     per-event steps without lagging a continuous rotate gesture. */
+  #compass-needle { display: block; width: 20px; height: 20px;
+    transition: transform .1s linear; }
+  #compass-needle svg { width: 100%; height: 100%; display: block; }
+
+  /* ==== navigation mode ==============================================
+     A dedicated screen: body.nav-mode hides EVERY piece of normal chrome
+     (search, panels, view switch, settings, zoom/tilt cards, dev button)
+     and shows the nav HUD instead. Only the attribution stays — it is
+     legally mandatory. */
+  body.nav-mode #search-panel, body.nav-mode #layers-control, body.nav-mode #settings,
+  body.nav-mode #corner-cluster, body.nav-mode #stop-suggest,
+  body.nav-mode #locate, body.nav-mode #zoom, body.nav-mode #tilt,
+  body.nav-mode #stops, body.nav-mode #times, body.nav-mode #status,
+  body.nav-mode #dev, body.nav-mode #map-menu { display: none !important; }
+  /* The "</>" developer entrance is the ONE piece of chrome that survives
+     nav mode (discreet, lower right): flipping developer mode mid-drive
+     shows/hides the simulation card immediately. The panel itself stays
+     hidden while navigating — the sim card is dev mode's nav-mode face. */
+  #nav-banner, #nav-bottom, #nav-sim, #nav-recenter, #nav-arrival,
+  #nav-side, #nav-attrib-wrap, #nav-route-options { display: none; }
+  /* Attribution in navigation mode: the standing credit line compacts to
+     the ⓘ badge (#nav-attrib, lower left) — full credits stay one tap
+     away, per the licenses' reasonable-to-the-medium clauses
+     (docs/features.md, "Attribution in navigation mode"). */
+  body.nav-mode .maplibregl-ctrl-attrib { display: none !important; }
+
+  /* All nav colours come from ONE token set (road-styles.js NAV, the same
+     navy/amber family as the CARTO cartography's steel water + amber
+     motorways) — index.html's applyNavTheme() mirrors the active theme's
+     tokens into these custom properties; no nav hex lives in this
+     stylesheet. */
+
+  /* Top banner: maneuver glyph + big countdown + instruction, on OUR deep
+     indigo navy — not Google's blue. Spans the stage on narrow screens; on wide
+     stages the WHOLE banner is centered at a sane max width — no
+     edge-to-edge text. The approach bar is its bottom edge; the lane row
+     (when the data knows the lanes at the next maneuver) is a row inside
+     the assembly; the "Danach" preview hangs as a small tab under the
+     left edge. */
+  body.nav-mode #nav-banner { display: block; position: absolute; top: 12px;
+    left: 50%; transform: translateX(-50%); z-index: 20;
+    width: calc(100vw - 24px); max-width: 720px;
+    filter: drop-shadow(0 8px 22px rgba(0,0,0,0.32)); }
+  #nav-banner .nb-inner { display: flex; gap: 20px; align-items: center;
+    background: var(--nav-banner); color: var(--nav-ink);
+    border-radius: 14px 14px 0 0; padding: 14px 22px 12px; }
+  #nav-glyph { width: 56px; height: 56px; color: var(--nav-ink); flex: none; }
+  #nav-glyph svg { width: 100%; height: 100%; display: block; }
+  #nav-banner .nb-main { min-width: 0; }
+  /* The countdown carries the amber accent — the one loud thing. */
+  #nav-distance { font-size: 40px; font-weight: 700; line-height: 1.05;
+    color: var(--nav-accent); font-variant-numeric: tabular-nums; }
+  #nav-text { font-size: 21px; color: var(--nav-ink); line-height: 1.25;
+    margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Lane guidance: one arrow per lane, the usable lanes bright, the rest
+     dimmed — only shown when the upcoming step carries lane data. */
+  #nav-lanes { display: none; justify-content: center; gap: 12px;
+    background: var(--nav-banner-edge); padding: 7px 14px 6px; }
+  #nav-lanes.open { display: flex; }
+  #nav-lanes .lane { width: 26px; height: 26px; color: var(--nav-ink); }
+  #nav-lanes .lane svg { width: 100%; height: 100%; display: block; }
+  #nav-lanes .lane.off { opacity: 0.32; }
+  #nav-bar { height: 5px; background: var(--nav-banner-bar);
+    border-radius: 0 0 14px 14px; overflow: hidden; }
+  #nav-bar-fill { display: block; height: 100%; width: 0%;
+    background: var(--nav-accent); transition: width .12s linear; }
+  #nav-next { display: inline-flex; align-items: center; gap: 8px;
+    margin-left: 22px; max-width: 70%; background: var(--nav-banner-edge);
+    color: var(--nav-ink); border-radius: 0 0 10px 10px; padding: 7px 14px;
+    font-size: 13.5px; }
+  #nav-next .nn-label { font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--nav-ink-soft); flex: none; }
+  #nav-next-glyph { width: 18px; height: 18px; flex: none; color: var(--nav-ink); }
+  #nav-next-glyph svg { width: 100%; height: 100%; display: block; }
+  #nav-next-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Bottom bar, Google's ergonomics: the round ✕ cancel at the LEFT end,
+     then the totals — remaining time large and coloured, distance +
+     arrival clock beneath — then the controls (speed chip, 2D/3D, map-type
+     toggle) and the route-options button at the RIGHT end. Sound moved out
+     into the floating side stack (#nav-side). */
+  body.nav-mode #nav-bottom { display: flex; position: absolute; left: 50%;
+    transform: translateX(-50%); bottom: 16px; z-index: 20; align-items: center;
+    gap: 18px; padding: 10px 14px 10px 12px; white-space: nowrap;
+    background: var(--nav-surface); color: var(--nav-surface-ink); }
+  #nav-bottom .nb-totals { display: flex; flex-direction: column; gap: 1px;
+    min-width: 118px; }
+  #nav-time-left { font-size: 28px; font-weight: 700; color: var(--nav-time);
+    line-height: 1.1; font-variant-numeric: tabular-nums; }
+  #nav-bottom .nb-sub { font-size: 13.5px; color: var(--nav-surface-muted);
+    font-variant-numeric: tabular-nums; display: flex; gap: 6px; }
+  #nav-bottom .nb-controls { display: flex; align-items: center; gap: 10px; }
+  #nav-speed { font-size: 12.5px; color: var(--nav-chip-ink);
+    background: var(--nav-chip-bg); border-radius: 999px; padding: 5px 11px;
+    font-variant-numeric: tabular-nums; }
+  #nav-camera { font-weight: 700; font-size: 13px; }
+  body.nav-mode #nav-bottom .icon-btn { color: var(--nav-surface-muted); }
+  body.nav-mode #nav-bottom .icon-btn:hover { background: rgba(127,127,127,0.14); }
+  #nav-layers svg, #nav-options svg { width: 18px; height: 18px; display: block; }
+  #nav-bottom .nb-sep { width: 1px; align-self: stretch; margin: 2px 2px;
+    background: var(--nav-surface-line); }
+  /* The cancel: a round outlined ✕ (Google's pattern), red identity kept
+     subtly — soft-red glyph, full danger red only on hover. */
+  #nav-exit { flex: none; width: 40px; height: 40px; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1.5px solid var(--nav-surface-line); background: transparent;
+    color: var(--nav-exit-ink); font-size: 17px; font-weight: 700;
+    padding: 0; cursor: pointer; line-height: 1; }
+  #nav-exit:hover { background: var(--nav-danger);
+    border-color: var(--nav-danger); color: var(--nav-danger-ink); }
+  /* Small screens: the bar spans the stage and the two groups sit at its
+     ends; the chip row may wrap under the totals rather than overflow. */
+  @media (max-width: 700px) {
+    body.nav-mode #nav-bottom { left: 10px; right: 10px; transform: none;
+      justify-content: space-between; flex-wrap: wrap; gap: 8px 12px;
+      padding: 10px 12px; }
+    #nav-time-left { font-size: 24px; }
+    #nav-bottom .nb-controls { gap: 7px; }
+  }
+
+  /* Floating round side buttons over the map (Google-style, right edge):
+     sound on/off and the compass. The compass needle mirrors the LIVE
+     camera bearing; tapping it toggles north-up (camera locked north, the
+     chevron rotates) vs heading-up (the classic chase cam) — the ring
+     marks the north-lock as active. */
+  body.nav-mode #nav-side { display: flex; position: absolute; right: 14px;
+    bottom: 96px; z-index: 21; flex-direction: column; gap: 10px; }
+  #nav-side button { width: 46px; height: 46px; border-radius: 999px; border: 0;
+    background: var(--nav-surface); color: var(--nav-surface-ink);
+    box-shadow: 0 6px 22px rgba(0,0,0,0.3); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; padding: 0; }
+  #nav-side button:hover { filter: brightness(1.12); }
+  #nav-mute svg { width: 20px; height: 20px; display: block; }
+  #nav-mute.muted { color: var(--nav-exit-ink); }
+  #nav-compass.active { box-shadow: 0 6px 22px rgba(0,0,0,0.3),
+    inset 0 0 0 2px var(--nav-accent); }
+  #nav-compass-needle { display: block; width: 22px; height: 22px;
+    transition: transform .1s linear; }
+  #nav-compass-needle svg { width: 100%; height: 100%; display: block; }
+
+  /* Attribution in nav: the compact ⓘ badge, lower left — genuinely
+     visible, unobtrusive, expands the full credit line on tap and
+     collapses again (auto after a few seconds, or on any outside click). */
+  body.nav-mode #nav-attrib-wrap { display: flex; position: absolute;
+    left: 12px; bottom: 12px; z-index: 21; align-items: flex-end; gap: 8px; }
+  #nav-attrib { flex: none; width: 26px; height: 26px; border-radius: 999px;
+    border: 0; background: var(--nav-surface); color: var(--nav-surface-ink);
+    font-size: 13px; font-weight: 600; font-style: italic;
+    font-family: Georgia, 'Times New Roman', serif; opacity: 0.85;
+    cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,0.3); padding: 0; }
+  #nav-attrib:hover { opacity: 1; }
+  #nav-attrib-line { display: none; max-width: min(70vw, 560px);
+    background: var(--nav-surface); color: var(--nav-surface-ink);
+    border-radius: 8px; padding: 6px 10px; font-size: 11.5px;
+    line-height: 1.45; box-shadow: 0 3px 10px rgba(0,0,0,0.3);
+    white-space: normal; }
+  #nav-attrib-wrap.open #nav-attrib-line { display: block; }
+
+  /* In-nav route options (the branching-arrows button): stops with
+     removable vias, a compact add-stop field with the shared ranked
+     autocomplete, and the alternates to switch between. Navy family,
+     closes on outside click. */
+  body.nav-mode #nav-route-options.open { display: block; position: absolute;
+    right: 70px; bottom: 74px; z-index: 23; width: 320px;
+    max-height: 58vh; overflow-y: auto; padding: 12px 14px;
+    background: var(--nav-surface); color: var(--nav-surface-ink);
+    border-radius: 14px; box-shadow: 0 12px 34px rgba(0,0,0,0.42); }
+  #nav-route-options h4 { margin: 10px 0 6px; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .06em;
+    color: var(--nav-surface-muted); }
+  #nav-route-options h4:first-child { margin-top: 0; }
+  .nro-stop { display: flex; align-items: center; gap: 8px; font-size: 13px;
+    padding: 4px 0; }
+  .nro-stop .stop-glyph { flex: none; width: 14px; height: 14px;
+    color: var(--nav-surface-muted); }
+  .nro-stop .stop-glyph svg { width: 14px; height: 14px; display: block; }
+  .nro-stop b { font-weight: 500; flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .nro-stop button { border: 0; background: none; flex: none;
+    color: var(--nav-surface-muted); cursor: pointer; font-size: 14px;
+    padding: 2px 4px; }
+  .nro-stop button:hover { color: var(--nav-exit-ink); }
+  #nro-add-input { width: 100%; box-sizing: border-box;
+    border: 1px solid var(--nav-surface-line);
+    background: rgba(255,255,255,0.08); color: var(--nav-surface-ink);
+    border-radius: 7px; padding: 7px 9px; font-size: 13px; outline: none; }
+  #nro-add-input::placeholder { color: var(--nav-surface-muted); }
+  #nro-suggest .result { border-bottom: 1px solid var(--nav-surface-line);
+    color: var(--nav-surface-ink); }
+  #nro-suggest .result:hover { background: rgba(255,255,255,0.08); }
+  #nro-suggest .result .ric { color: var(--nav-surface-muted); }
+  #nro-suggest .result .sub, #nro-suggest .result .dist {
+    color: var(--nav-surface-muted); }
+  .nro-alt { display: flex; gap: 8px; align-items: center; padding: 7px 8px;
+    border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .nro-alt:hover { background: rgba(255,255,255,0.08); }
+  .nro-alt.active { background: rgba(255,255,255,0.12); cursor: default; }
+  .nro-alt span { flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .nro-alt b { flex: none; color: var(--nav-accent);
+    font-variant-numeric: tabular-nums; }
+
+  /* Re-center chip: shown while the user peeks ahead (drag/wheel). */
+  body.nav-mode #nav-recenter.open { display: inline-flex; position: absolute;
+    left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 21;
+    align-items: center; gap: 7px; border: 0; border-radius: 999px;
+    background: var(--nav-surface); color: var(--nav-time); font-size: 14px;
+    font-weight: 600; padding: 10px 18px; cursor: pointer;
+    box-shadow: 0 6px 22px rgba(0,0,0,0.28); }
+
+  /* Dev/sim card: pause, tempo slider, straight-section fast-forward
+     slider, jump-to-maneuver / jump-to-announcement. The header chevron
+     collapses it to its title row (persisted; auto-collapsed on narrow
+     viewports). Developer chrome, so it only renders while developer mode
+     is ON (body.dev-on) — a fresh visitor navigates without it; the sim
+     still drives the demo underneath. */
+  body.nav-mode.dev-on #nav-sim { display: block; position: absolute; right: 16px;
+    top: 16px; z-index: 20; width: 270px; padding: 8px 14px 12px; font-size: 13px;
+    background: var(--nav-surface); color: var(--nav-surface-ink); }
+  /* Narrow stages: the banner owns the full width up top — the sim card
+     moves below it instead of overlapping its right edge. */
+  @media (max-width: 760px) {
+    body.nav-mode.dev-on #nav-sim { top: 170px; right: 10px; }
+  }
+  /* Collapsed: a slim "SIMULATION" pill in the corner — one click hides,
+     one click restores. */
+  body.nav-mode.dev-on #nav-sim.collapsed { width: auto; padding: 2px 12px;
+    border-radius: 999px; }
+  /* The whole title row is the click target, with visible hover feedback
+     and an explicit − / + affordance — collapsing must be obvious. */
+  #nav-sim .ns-head { display: flex; align-items: center; width: 100%;
+    justify-content: space-between; gap: 10px; border: 0; background: none;
+    padding: 6px 4px; margin: 0 -4px; border-radius: 8px; cursor: pointer;
+    font-family: inherit; box-sizing: content-box;
+    font-size: 11.5px; font-weight: 600; color: var(--nav-surface-muted);
+    text-transform: uppercase; letter-spacing: .06em; }
+  #nav-sim .ns-head:hover { background: rgba(255,255,255,0.09);
+    color: var(--nav-surface-ink); }
+  #nav-sim .ns-sign { flex: none; width: 18px; height: 18px;
+    border: 1px solid var(--nav-surface-line); border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13px; line-height: 1; color: var(--nav-surface-ink); }
+  #nav-sim .ns-sign::before { content: '−'; }
+  #nav-sim.collapsed .ns-sign::before { content: '+'; }
+  #nav-sim .ns-body { margin-top: 4px; }
+  #nav-sim.collapsed .ns-body { display: none; }
+  #nav-sim .ns-row { display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+    color: var(--nav-surface-ink); }
+  #nav-sim .ns-row button { border: 1px solid var(--nav-surface-line);
+    background: var(--nav-chip-bg); color: var(--nav-surface-ink);
+    font-size: 12.5px; padding: 6px 10px; border-radius: 7px; cursor: pointer; }
+  #nav-sim .ns-row button:hover { filter: brightness(0.96); }
+  /* Paired steppers: « Manöver » / « Ansage » — back and forward at both
+     granularities. */
+  #nav-sim .ns-steppers { justify-content: space-between; gap: 4px; }
+  #nav-sim .ns-steppers .ns-step-label { font-size: 12px;
+    color: var(--nav-surface-muted); }
+  #nav-sim .ns-steppers button { padding: 6px 9px; font-weight: 700; }
+  #nav-sim .ns-slider label { flex: none; width: 88px; color: var(--nav-surface-muted); }
+  #nav-sim .ns-slider input[type="range"] { flex: 1; min-width: 0;
+    accent-color: var(--nav-time); }
+  #nav-sim .ns-slider .ns-val { flex: none; width: 38px; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--nav-surface-ink); }
+  #nav-sim-readout { font-size: 12px; color: var(--nav-surface-muted); margin-top: 4px;
+    font-variant-numeric: tabular-nums; }
+
+  /* Arrival card. */
+  body.nav-mode #nav-arrival.open { display: block; position: absolute; left: 50%;
+    top: 38%; transform: translate(-50%, -50%); z-index: 22; text-align: center;
+    padding: 28px 38px; min-width: 280px;
+    background: var(--nav-surface); color: var(--nav-surface-ink); }
+  #nav-arrival .na-glyph { width: 44px; height: 44px; margin: 0 auto 10px;
+    color: var(--nav-time); }
+  #nav-arrival .na-glyph svg { width: 100%; height: 100%; }
+  #nav-arrival h3 { margin: 0 0 6px; font-size: 22px; color: var(--nav-surface-ink); }
+  #nav-arrival-sub { font-size: 14px; color: var(--nav-surface-muted); margin-bottom: 16px; }
+  /* The stock .btn is near-black — invisible on the navy card; "Fertig"
+     rides the Start-button blue instead. */
+  #nav-arrival .btn { background: var(--nav-start); }
+  #nav-arrival .btn:hover { background: var(--nav-start-hover); }
+
+  /* The heading-oriented position chevron (nav.js marker element) —
+     ~1.5× the old 46px so the car reads at a glance; colours from the
+     nav tokens (paper disc, navy arrow). */
+  .am-nav-arrow { width: 68px; height: 68px; pointer-events: none;
+    filter: drop-shadow(0 3px 8px rgba(0,0,0,0.45)); }
+  .am-nav-arrow svg { width: 100%; height: 100%; display: block; }
+  .am-nav-arrow circle { fill: var(--nav-marker-ring); }
+  .am-nav-arrow path { fill: var(--nav-marker); }
+
+  /* Start in the directions panel — only while a route stands. OUR deep
+     navy, not Google's #1a73e8: nav's identity starts at its entry point. */
+  #nav-start-row { display: none; margin-top: 10px; }
+  #nav-start-row.open { display: block; }
+  #btn-nav-start { background: var(--nav-start); display: inline-flex;
+    align-items: center; gap: 8px; font-size: 14px; font-weight: 600;
+    padding: 10px 22px; border-radius: 999px; }
+  #btn-nav-start:hover { background: var(--nav-start-hover); }
+  #btn-nav-start .ph-icon { width: 15px; height: 15px; }
+
+  /* -- status toast -------------------------------------------------- */
+  #status {
+    position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 12;
+    background: rgba(20,26,34,0.88); color: #eef3f8; font-size: 13px;
+    padding: 8px 14px; border-radius: 999px; display: none; max-width: 60vw;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #status.open { display: block; }
+
+  /* -- developer panel: a popover anchored at its own "</>" button ----- */
+  /* Everything demo/authoring lives in here, split into individually
+     collapsible sections; the landing page stays a plain map. The panel
+     grows up-left from the lower-right corner (the gear menu's own upward
+     pattern), on the same navy surface family as the nav HUD — a floating
+     workbench card, not a full-height side wall. */
+  #dev {
+    position: absolute; right: 12px; bottom: 86px; z-index: 16; width: 340px;
+    max-height: min(72vh, calc(100vh - 130px));
+    background: var(--nav-surface); color: var(--nav-surface-ink);
+    border-radius: 14px; box-shadow: 0 14px 40px rgba(0,0,0,.45);
+    overflow-y: auto; padding: 14px 16px 18px; box-sizing: border-box;
+    opacity: 0; transform: translateY(10px) scale(0.97);
+    transform-origin: 100% 100%; pointer-events: none;
+    transition: transform .18s ease, opacity .18s ease;
+  }
+  #dev.open { opacity: 1; transform: none; pointer-events: auto; }
+  #dev-head { font-size: 13px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--nav-surface-muted); margin: 2px 0 12px; }
+  #dev .hint { font-size: 12px; color: #8592a3; line-height: 1.45; margin: 0 0 10px; }
+  #dev button {
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18);
+    color: #e8eef5; font-size: 13px; padding: 7px 11px; border-radius: 7px;
+    cursor: pointer; margin: 0 6px 6px 0;
+  }
+  #dev button:hover { background: rgba(255,255,255,0.16); }
+  #dev button.active { background: #e8edf3; color: #141a22; }
+  #dev button.armed { border-color: #e5a173; color: #e5a173; }
+  #dev-close { position: absolute; top: 10px; right: 12px; background: none; border: 0; color: #8fa0b4; font-size: 18px; cursor: pointer; }
+  .dev-section { background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.10); border-radius: 10px;
+    margin-bottom: 10px; padding: 0 12px 4px; }
+  .dev-section summary { cursor: pointer; list-style: none; display: flex;
+    align-items: center; gap: 8px; padding: 11px 0 9px; font-size: 12px;
+    letter-spacing: .14em; text-transform: uppercase; color: #8fa0b4;
+    user-select: none; }
+  .dev-section summary::-webkit-details-marker { display: none; }
+  .dev-section summary::before { content: '▸'; font-size: 10px;
+    transition: transform .15s ease; }
+  .dev-section[open] summary::before { transform: rotate(90deg); }
+  #dev-debug-info { font-size: 12px; color: #a9b6c6; line-height: 1.65;
+    font-variant-numeric: tabular-nums; margin: 2px 0 8px; white-space: pre-line; }
+
+  /* Scenario-only chrome: hidden until a demo scenario is loaded. */
+  #stops { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 11;
+    display: none; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 80vw; }
+  #stops.open { display: flex; }
+  #stops button {
+    background: rgba(20,26,34,0.86); border: 1px solid rgba(255,255,255,0.3); color: #e8edf3;
+    font-size: 13px; padding: 8px 14px; border-radius: 999px; cursor: pointer;
+  }
+  #stops button.active { background: #f2f5f8; color: #141a22; }
+  #times { position: absolute; top: 70px; right: 12px; z-index: 11; width: 290px; padding: 16px 20px; display: none; }
+  #times.open { display: block; }
+  #times h3 { margin: 0 0 12px; font-size: 19px; font-weight: 600; }
+  #times .row { display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid #e4e8ee; font-size: 14px; }
+  #times .row b { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="map" data-agentic-map data-agentic-spec-url="/api/demo-spec"></div>
+
+  <div id="search-panel">
+    <div class="card">
+      <div class="search-row">
+        <span class="search-glyph" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4.5-4.5"/></svg>
+        </span>
+        <input id="q" placeholder="Ort, Land oder Adresse suchen" autocomplete="off">
+        <button class="icon-btn" id="btn-clear" title="Zurücksetzen" hidden>✕</button>
+      </div>
+      <div id="results"></div>
+    </div>
+    <!-- Place detail card: fed by a chosen search result or a POI click,
+         docked here rather than floating over the map. -->
+    <div class="card" id="place-card">
+      <div class="pc-head">
+        <div>
+          <div class="pc-name" id="pc-name"></div>
+          <div class="pc-kind" id="pc-kind"></div>
+        </div>
+        <button class="icon-btn" id="pc-close" title="Schließen">✕</button>
+      </div>
+      <div class="pc-address" id="pc-address"></div>
+      <div class="pc-coords" id="pc-coords"></div>
+      <div class="pc-actions">
+        <button class="btn" id="pc-route"><span class="ph-icon" data-ph="arrow-bend-up-right"></span>Route</button>
+        <button class="btn ghost" id="pc-route-from"><span class="ph-icon" data-ph="navigation-arrow"></span>Route von hier</button>
+      </div>
+    </div>
+    <div class="card" id="route-panel">
+      <!-- One icon tab per travel mode; the duration under each fills in as
+           its route lands (all four are requested in parallel). -->
+      <div id="mode-tabs" role="tablist">
+        <button class="mode-tab" data-mode="car" title="Auto"><span class="mt-icon"></span><span class="mt-time">—</span></button>
+        <button class="mode-tab" data-mode="truck" title="LKW"><span class="mt-icon"></span><span class="mt-time">—</span></button>
+        <button class="mode-tab" data-mode="walk" title="Zu Fuß"><span class="mt-icon"></span><span class="mt-time">—</span></button>
+        <button class="mode-tab" data-mode="bike" title="Fahrrad"><span class="mt-icon"></span><span class="mt-time">—</span></button>
+      </div>
+      <!-- Stops are rendered from the model, so adding one by right-click and
+           adding one by search land in the same list. -->
+      <div class="stops-wrap">
+        <div id="stops-list"></div>
+        <button class="icon-btn" id="btn-swap" title="Start und Ziel tauschen" hidden>⇅</button>
+      </div>
+      <button class="link-btn" id="btn-add-stop">+ Ziel hinzufügen</button>
+      <!-- No "Route"/"Löschen" buttons: routing is automatic on every trip
+           change, and clearing lives on each row's ✕ (Google's per-field ✕). -->
+      <div class="route-actions">
+        <button class="link-btn" id="btn-route-options" style="padding:0">Optionen</button>
+        <span style="flex:1"></span>
+      </div>
+      <div id="route-options">
+        <label class="opt"><input type="checkbox" id="avoid-motorway" value="motorway"> Autobahnen meiden</label>
+        <label class="opt"><input type="checkbox" id="avoid-toll" value="toll"> Mautstraßen meiden</label>
+        <label class="opt"><input type="checkbox" id="avoid-ferry" value="ferry"> Fähren meiden</label>
+        <label class="opt">Abfahrt <input type="time" id="depart-at"></label>
+        <div class="opt" id="units-opt">Entfernungen:
+          <label><input type="radio" name="units" value="auto"> Automatisch</label>
+          <label><input type="radio" name="units" value="km"> km</label>
+          <label><input type="radio" name="units" value="mi"> Meilen</label>
+        </div>
+        <div class="hint" id="options-note"></div>
+      </div>
+      <div id="route-result"></div>
+      <!-- Enter navigation mode: only shown while a route is drawn. -->
+      <div id="nav-start-row">
+        <button class="btn" id="btn-nav-start" title="Navigation starten">
+          <span class="ph-icon" data-ph="navigation-arrow"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l9 20-9-5.5L3 22z"/></svg></span>Start</button>
+      </div>
+      <div id="route-steps"></div>
+    </div>
+    <!-- Stop-field autocomplete: one shared dropdown, positioned under the
+         active stop input by JS; rows come from the same ranked lookup as
+         the main search box. -->
+    <div class="card" id="stop-suggest"></div>
+  </div>
+
+  <!-- Right-click menu, Google-informed but ours: iconed card, coordinates
+       header copies on click, plus "Was ist hier?" / "In der Nähe suchen" /
+       "Ort teilen". Deliberately NO "report a problem"-style entries. -->
+  <div id="map-menu" class="card">
+    <button id="menu-coord" title="Koordinaten kopieren">
+      <span class="ph-icon" data-ph="copy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></span>
+      <span id="menu-coord-text"></span>
+    </button>
+    <button data-role="start"><span class="ph-icon" data-ph="navigation-arrow"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l9 20-9-5.5L3 22z"/></svg></span>Route von hier</button>
+    <button data-role="via"><span class="ph-icon" data-ph="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>Als Zwischenstopp</button>
+    <button data-role="end"><span class="ph-icon" data-ph="map-pin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 1113 0C18.5 14.8 12 21 12 21z"/><circle cx="12" cy="10" r="2.2"/></svg></span>Route hierhin</button>
+    <div class="menu-sep"></div>
+    <button data-role="whatishere"><span class="ph-icon" data-ph="info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></span>Was ist hier?</button>
+    <button data-role="nearby"><span class="ph-icon" data-ph="magnifying-glass"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4.5-4.5"/></svg></span>In der Nähe suchen</button>
+    <button data-role="share"><span class="ph-icon" data-ph="share-network"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="2.5"/><circle cx="17" cy="5.5" r="2.5"/><circle cx="17" cy="18.5" r="2.5"/><path d="M8.2 10.8l6.6-4M8.2 13.2l6.6 4"/></svg></span>Ort teilen</button>
+    <div class="menu-sep"></div>
+    <button data-role="centre"><span class="ph-icon" data-ph="crosshair-simple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></span>Hierhin zentrieren</button>
+  </div>
+
+  <!-- View = WHAT is on the map (Hybrid / Satellit / Karte). The layers
+       control's big tile previews the view you would switch TO (Google's
+       convention) and opens the "Kartentyp" picker; how Karte is inked
+       (hell / dunkel / automatisch) is the theme button next to it. -->
+  <div id="layers-control">
+    <button id="layers-btn" title="Kartentyp wählen">
+      <span class="lb-icon ph-icon" data-ph="stack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 17l9 5 9-5"/></svg></span>
+      <span class="lb-badge"><span class="ph-icon" data-ph="stack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 17l9 5 9-5"/></svg></span><span>Ebenen</span></span>
+    </button>
+    <div id="layers-picker" class="card">
+      <div class="lp-head">Kartentyp</div>
+      <div id="layers-grid"></div>
+    </div>
+  </div>
+
+  <!-- Lower-left corner cluster: theme toggle + user settings behind the
+       gear (network mode, label language). Same wiring as always — only the
+       placement moved out of the top-right, which keeps only the layers
+       control. -->
+  <div id="corner-cluster">
+  <div id="settings">
+    <button id="settings-toggle" title="Einstellungen"><span class="ph-icon" data-ph="gear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.51h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg></span></button>
+    <div id="settings-menu" class="card">
+      <div class="settings-head">Einstellungen
+        <button class="icon-btn" id="settings-close" title="Schließen">✕</button>
+      </div>
+      <div class="settings-label">Netzwerk</div>
+      <div id="mode-switch" title="Netzmodus">
+        <button data-mode="offline">Offline</button>
+        <button data-mode="mixed">Gemischt</button>
+        <button data-mode="online">Online</button>
+      </div>
+      <div class="settings-label" style="margin-top:12px">Sprache</div>
+      <select id="lang" title="Sprache der Beschriftung"></select>
+    </div>
+  </div>
+  <button id="btn-theme" title="Design"></button>
+  </div>
+
+  <!-- 3D tilt (Google's pitched perspective) + compass. The needle shows the
+       live bearing. The 3D button animates pitch 0 <-> 55 deg and ONLY pitch
+       — at close zoom the extruded buildings rise with it. The compass is a
+       north-lock toggle: bearing animates to 0 and stays locked (rotate
+       gestures snap back) until clicked again; it never touches the pitch.
+       Drawn needle rather than a Phosphor glyph: the icon must ROTATE to
+       point north, and Phosphor's compass carries a fixed rose. -->
+  <div id="tilt" class="card">
+    <button id="btn-3d" title="3D-Ansicht (nur Neigung)">3D</button>
+    <button id="btn-compass" title="Nach Norden ausrichten und fixieren">
+      <span id="compass-needle" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 2.5l3.6 9.5h-7.2z" fill="#e2574c"/>
+          <path d="M12 21.5L8.4 12h7.2z" fill="#8b97a6"/></svg>
+      </span>
+    </button>
+  </div>
+
+  <div id="locate" class="card">
+    <button id="btn-locate" title="Meinen Standort anzeigen">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/>
+        <path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"/></svg>
+    </button>
+  </div>
+
+  <div id="zoom" class="card">
+    <button id="zoom-in" title="Vergrößern">＋</button>
+    <button id="zoom-out" title="Verkleinern">−</button>
+  </div>
+
+  <!-- Developer mode: unobtrusive toggle under the zoom cluster; opens the
+       structured panel on the right edge. State persists in localStorage. -->
+  <div id="devmode" class="card">
+    <button id="btn-dev" title="Entwicklermodus">
+      <span class="ph-icon" data-ph="code"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg></span>
+    </button>
+  </div>
+
+  <div id="stops"></div>
+  <div id="times" class="card"></div>
+  <div id="status"></div>
+
+  <!-- ============ Navigation mode (nav.js drives all of it) ============ -->
+  <!-- Google-style top banner: maneuver glyph, big live countdown,
+       instruction; lane guidance row when the next maneuver has lane data;
+       approach bar as the bottom edge; "Danach" preview tab underneath. -->
+  <div id="nav-banner">
+    <div class="nb-inner">
+      <span id="nav-glyph"></span>
+      <div class="nb-main">
+        <div id="nav-distance">—</div>
+        <div id="nav-text"></div>
+      </div>
+    </div>
+    <div id="nav-lanes"></div>
+    <div id="nav-bar"><i id="nav-bar-fill"></i></div>
+    <div id="nav-next">
+      <span class="nn-label">Danach</span>
+      <span id="nav-next-glyph"></span>
+      <span id="nav-next-text"></span>
+    </div>
+  </div>
+
+  <!-- Bottom bar, Google's ergonomics: the round ✕ cancel at the LEFT end,
+       then the totals (remaining TIME leads, distance + arrival clock
+       beneath), then the controls (speed chip, 2D/3D, map-type toggle) and
+       the route-options button at the RIGHT end. Sound lives in the
+       floating side stack. -->
+  <div id="nav-bottom" class="card">
+    <button id="nav-exit" title="Navigation beenden">✕</button>
+    <div class="nb-totals">
+      <b id="nav-time-left">—</b>
+      <div class="nb-sub"><span id="nav-remaining">—</span><span>·</span><span id="nav-eta">—</span></div>
+    </div>
+    <div class="nb-controls">
+      <span id="nav-speed">—</span>
+      <button class="icon-btn" id="nav-camera" title="Draufsicht (2D)">2D</button>
+      <button class="icon-btn" id="nav-layers" title="Kartentyp wechseln (Hybrid/Karte)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 17l9 5 9-5"/></svg>
+      </button>
+      <span class="nb-sep"></span>
+      <button class="icon-btn" id="nav-options" title="Routenoptionen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 21V9a4 4 0 014-4h7"/><path d="M14 2l3 3-3 3"/><path d="M18 21v-6a4 4 0 00-4-4h-1"/><circle cx="6" cy="21" r="0.5"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Floating round side buttons (Google-style, right edge): sound and
+       the compass / north-up toggle. nav.js wires both. -->
+  <div id="nav-side">
+    <button id="nav-mute" title="Ansagen stumm schalten">
+      <span class="nm-on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/></svg></span>
+      <span class="nm-off" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M22 9l-6 6M16 9l6 6"/></svg></span>
+    </button>
+    <button id="nav-compass" title="Fahrtrichtung oben — tippen fixiert Norden">
+      <span id="nav-compass-needle" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M12 2.5l3.6 9.5h-7.2z" fill="#e2574c"/>
+          <path d="M12 21.5L8.4 12h7.2z" fill="#8b97a6"/></svg>
+      </span>
+    </button>
+  </div>
+
+  <!-- In-nav route options: stops (vias removable), add-stop with the
+       shared ranked autocomplete, alternates to switch between. -->
+  <div id="nav-route-options">
+    <h4>Ziele</h4>
+    <div id="nro-stops"></div>
+    <h4>Stopp hinzufügen</h4>
+    <input id="nro-add-input" placeholder="Ort oder Adresse suchen" autocomplete="off">
+    <div id="nro-suggest"></div>
+    <h4 id="nro-alts-head">Alternativen</h4>
+    <div id="nro-alts"></div>
+  </div>
+
+  <!-- Attribution in navigation mode: the ⓘ badge expands the full credit
+       line on tap (see docs/features.md, "Attribution in navigation mode"). -->
+  <div id="nav-attrib-wrap">
+    <button id="nav-attrib" title="Kartenquellen und Lizenzen">i</button>
+    <div id="nav-attrib-line"></div>
+  </div>
+
+  <!-- Peek-ahead escape hatch: shown while a gesture suspended the follow
+       camera; one click snaps the chase cam back onto the arrow. -->
+  <button id="nav-recenter">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 3l7 18-7-4.4L5 21z"/></svg>
+    Zentrieren</button>
+
+  <!-- Dev/simulation window: drive controls for demos and the harness.
+       Collapsible to its title row (chevron; persisted; auto-collapsed on
+       narrow viewports). Two independent tempo controls: the base factor
+       and the straight-section fast-forward multiplier (×1 = aus — the
+       old checkbox is gone, the slider IS the switch). -->
+  <div id="nav-sim" class="card">
+    <button class="ns-head" id="nav-sim-collapse" aria-expanded="true" title="Simulationsfenster ein-/ausklappen">
+      <span>Simulation</span>
+      <span class="ns-sign" aria-hidden="true"></span>
+    </button>
+    <div class="ns-body">
+      <div class="ns-row">
+        <button id="nav-sim-toggle">Pause</button>
+        <button id="nav-sim-reset" title="Zurück zum Start">Reset</button>
+      </div>
+      <div class="ns-row ns-steppers">
+        <button id="nav-sim-prev" title="Zum vorherigen Manöver springen">«</button>
+        <span class="ns-step-label">Manöver</span>
+        <button id="nav-sim-jump" title="Kurz vor das nächste Manöver springen">»</button>
+        <button id="nav-sim-announce-prev" title="Zur vorherigen Sprachansage springen">«</button>
+        <span class="ns-step-label">Ansage</span>
+        <button id="nav-sim-announce" title="Kurz vor die nächste Sprachansage springen">»</button>
+      </div>
+      <div class="ns-row ns-slider">
+        <label for="nav-sim-factor">Tempo</label>
+        <input type="range" id="nav-sim-factor" min="0" max="8" step="1" value="0">
+        <span class="ns-val" id="nav-sim-factor-val">1×</span>
+      </div>
+      <div class="ns-row ns-slider">
+        <label for="nav-sim-ffmult" title="Schnellvorlauf auf geraden Abschnitten">Schnellvorlauf</label>
+        <input type="range" id="nav-sim-ffmult" min="0" max="5" step="1" value="0">
+        <span class="ns-val" id="nav-sim-ffmult-val">aus</span>
+      </div>
+      <div id="nav-sim-readout">—</div>
+    </div>
+  </div>
+
+  <!-- Arrival: shown at the destination, auto-returns to the normal UI. -->
+  <div id="nav-arrival" class="card">
+    <div class="na-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V4"/><path d="M4 4h13l-2.5 4L17 12H4"/></svg></div>
+    <h3>Ziel erreicht</h3>
+    <div id="nav-arrival-sub"></div>
+    <button class="btn" id="nav-arrival-done">Fertig</button>
+  </div>
+
+  <div id="dev">
+    <button id="dev-close" title="Schließen">✕</button>
+    <div id="dev-head">Entwicklermodus</div>
+
+    <details class="dev-section" data-section="szenarien" open>
+      <summary>Szenarien</summary>
+      <p class="hint">Demo-Touren: Stopps, Pins, Highlights, wachsende Routen —
+        laden, anspringen, abspielen. Die Startseite bleibt eine reine Karte.</p>
+      <button id="dev-load-scenario">Szenario laden</button>
+      <button id="dev-unload-scenario">Karte leeren</button>
+      <div id="dev-stops"></div>
+      <button id="dev-route-anim">Route wächst (HQ → Flughafen)</button>
+      <button id="dev-route-long">Überland (Stuttgart → München)</button>
+      <button id="dev-matrix">⏱ Erreichbarkeitsmatrix</button>
+    </details>
+
+    <details class="dev-section" data-section="effekte">
+      <summary>Effekte</summary>
+      <button id="dev-ping">Ping hier</button>
+      <button id="dev-radius">Radius 400 m</button>
+      <button id="dev-polygon">Fläche markieren</button>
+      <button id="dev-transit">📡 ÖPNV pingen</button>
+    </details>
+
+    <details class="dev-section" data-section="simulation">
+      <summary>Simulation</summary>
+      <p class="hint">Fahrsimulation entlang der aktuellen Route — das
+        Simulationsfenster (Tempo, Schnellvorlauf, Sprung zum Manöver) schwebt
+        im Navigationsmodus rechts oben. Erst eine Route berechnen.</p>
+      <button id="dev-nav">🧭 Navigation starten</button>
+    </details>
+
+    <details class="dev-section" data-section="overlays">
+      <summary>Overlays</summary>
+      <p class="hint">Heatmap- und Reichweiten-Galerie: Radien, Fahrzeit-
+        Isodistanzen, Dichte, Flächen — mit ehrlichen Fußnoten.</p>
+      <button id="dev-overlays">Overlay-Galerie öffnen</button>
+    </details>
+
+    <details class="dev-section" data-section="offline">
+      <summary>Offline-Paket</summary>
+      <p class="hint">Record lädt Kacheln, Straßendaten und Beschriftungen für alle Stopps —
+        danach läuft das Szenario ohne Internet.</p>
+      <button id="dev-record">⏺ Record</button>
+      <button id="dev-offline">Modus: online</button>
+      <button id="dev-cache">Cache leeren</button>
+      <button id="dev-package">Paket bauen</button>
+    </details>
+
+    <details class="dev-section" data-section="debug">
+      <summary>Debug</summary>
+      <div id="dev-debug-info">—</div>
+      <button id="dev-debug-refresh">Aktualisieren</button>
+    </details>
+  </div>
+</div>
+
+<script src="/vendor/maplibre-gl.js"></script>
+<script src="/vendor/basemaps.js"></script>
+<script src="/road-styles.js"></script>
+<!-- Opens a socket only when the server has AGENTIC_MAPS_DEBUG=1. -->
+<script src="/debug-bridge.js"></script>
+<script src="/map.js"></script>
+<script src="/nav.js"></script>
+<script>
+(async () => {
+  const el = document.getElementById('map');
+  // -- browser sessions (?session=<token>) -----------------------------
+  // An MCP tool (open_map_view) stored a full MapSpec server-side; point
+  // the mount at that session's payload SYNCHRONOUSLY (render.html's own
+  // pattern — an await here would race map.js's DOMContentLoaded
+  // auto-mount, which grabs the element with the default URL). The map
+  // then mounts straight onto the session: routes, alternates, pins, the
+  // full normal UI. An expired/unknown token fails that mount; the retry
+  // below falls back to the normal map app and reports it.
+  const sessionToken = new URLSearchParams(location.search).get('session');
+  let sessionError = null;
+  if (sessionToken) {
+    el.setAttribute('data-agentic-spec-url',
+      '/api/v1/maps/sessions/' + encodeURIComponent(sessionToken));
+  }
+  let map = await window.agenticMountMaps().then((maps) => maps[0]);
+  if (!map && sessionToken) {
+    sessionError = 'Sitzung unbekannt oder abgelaufen';
+    el.removeAttribute('data-agentic-map-mounted');
+    el.setAttribute('data-agentic-spec-url', '/api/demo-spec');
+    map = await window.agenticMountMaps().then((maps) => maps[0]);
+  }
+  // Three.js globe takes over once a whole continent fits the stage.
+  // Where the shared llming-stage vendor bundle is mounted. The host may put
+  // it somewhere else; the payload says where, and globe.js reads it.
+  window.agenticStageVendor = (map.payload.stage_asset_prefix || '/_stage') + '/vendor';
+  import('/globe.js').then(() => { window.agenticGlobe = window.agenticMountGlobe(map); })
+    .catch((err) => console.error('[globe] mount failed', err));
+  const $ = (id) => document.getElementById(id);
+
+  const post = (url, body) => fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const LANG_NAMES = {
+    de: 'Deutsch', en: 'English', fr: 'Français', es: 'Español', it: 'Italiano',
+    nl: 'Nederlands', pl: 'Polski', pt: 'Português', ru: 'Русский', tr: 'Türkçe',
+    sv: 'Svenska', uk: 'Українська', el: 'Ελληνικά', hu: 'Magyar', id: 'Bahasa',
+    vi: 'Tiếng Việt', zh: '中文', ja: '日本語', ko: '한국어', ar: 'العربية',
+    he: 'עברית', hi: 'हिन्दी', bn: 'বাংলা', fa: 'فارسی', ur: 'اردو',
+  };
+  let lang = map.payload.lang || 'de';
+
+  let statusTimer = null;
+  function status(text, sticky) {
+    const node = $('status');
+    node.textContent = text;
+    node.classList.add('open');
+    clearTimeout(statusTimer);
+    if (!sticky) statusTimer = setTimeout(() => node.classList.remove('open'), 6000);
+  }
+
+  // ===================================================================
+  // Phosphor icons, fetched from the llming-stage mount and inlined.
+  // The served SVGs use fill="currentColor" (checked), so an inlined copy
+  // tints via CSS `color` — an <img src> would not. Every consumer goes
+  // through phIcon(name, fallback) and keeps working when /_stage is not
+  // mounted: the fallback is the hand-drawn glyph that was there before.
+  // ===================================================================
+  const phCache = {};
+  const PH_NAMES = ['car', 'truck', 'person-simple-walk', 'bicycle',
+    'arrows-down-up', 'arrow-bend-up-right', 'navigation-arrow', 'x', 'plus',
+    'circle', 'map-pin', 'gear', 'sun', 'moon', 'circle-half', 'stack', 'code',
+    'copy', 'info', 'magnifying-glass', 'share-network', 'crosshair-simple',
+    'buildings', 'signpost', 'globe-hemisphere-west'];
+  const MODE_PH = { car: 'car', truck: 'truck', walk: 'person-simple-walk', bike: 'bicycle' };
+  // The pre-Phosphor stroke glyphs, kept as offline/degraded fallbacks.
+  const MODE_FALLBACK = (() => {
+    const stroke = 'fill="none" stroke="currentColor" stroke-width="1.8" '
+      + 'stroke-linecap="round" stroke-linejoin="round"';
+    return {
+      car: '<svg viewBox="0 0 24 24" ' + stroke + '><path d="M4 15l1.5-5.5A2 2 0 017.4 8h9.2a2 2 0 011.9 1.5L20 15"/><path d="M3 15h18v4h-2m-14 0H3z"/><circle cx="7.2" cy="17" r="1.4"/><circle cx="16.8" cy="17" r="1.4"/></svg>',
+      truck: '<svg viewBox="0 0 24 24" ' + stroke + '><path d="M3 7h10v9H3z"/><path d="M13 11h4l3 3v2h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17" cy="18" r="1.6"/></svg>',
+      walk: '<svg viewBox="0 0 24 24" ' + stroke + '><circle cx="13" cy="4.5" r="1.6"/><path d="M10 20l2-5-1.5-4L8 12l-1 3M12.5 11l2 2 2.8 1M11.5 15l1.5 2 1 4"/></svg>',
+      bike: '<svg viewBox="0 0 24 24" ' + stroke + '><circle cx="6" cy="17" r="3"/><circle cx="18" cy="17" r="3"/><path d="M6 17l4-8h5l3 8M10 9h3M9 17h9"/></svg>',
+    };
+  })();
+  function phIcon(name, fallback) { return phCache[name] || fallback || ''; }
+  function modeIcon(mode) { return phIcon(MODE_PH[mode], MODE_FALLBACK[mode] || MODE_FALLBACK.car); }
+
+  // -- theme (bright / dark / auto) ------------------------------------
+  // How "Karte" is inked. Hybrid/Satellit are imagery and ignore it; the
+  // choice is remembered and applies whenever the cartography is on stage.
+  const THEME_KEY = 'am-maps-theme';
+  const THEME_CYCLE = ['bright', 'dark', 'auto'];
+  let theme = localStorage.getItem(THEME_KEY);
+  if (THEME_CYCLE.indexOf(theme) === -1) theme = 'auto';
+  const darkScheme = matchMedia('(prefers-color-scheme: dark)');
+  const effectiveDark = () => theme === 'dark' || (theme === 'auto' && darkScheme.matches);
+  const THEME_ICON = { bright: 'sun', dark: 'moon', auto: 'circle-half' };
+  const THEME_LABEL = { bright: 'Hell', dark: 'Dunkel', auto: 'Automatisch' };
+  const THEME_FALLBACK = {
+    sun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M19.4 4.6l-1.8 1.8M6.4 17.6l-1.8 1.8"/></svg>',
+    moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M20.5 14.1A8.5 8.5 0 1 1 9.9 3.5a7 7 0 1 0 10.6 10.6z"/></svg>',
+    'circle-half': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
+  };
+  function updateThemeButton() {
+    const btn = $('btn-theme');
+    if (!btn) return;
+    btn.innerHTML = phIcon(THEME_ICON[theme], THEME_FALLBACK[THEME_ICON[theme]]);
+    btn.title = 'Design: ' + THEME_LABEL[theme];
+  }
+
+  /** Fill mode tabs and every [data-ph] span; called once with fallbacks so
+   *  the UI is never iconless, again when the fetched set has landed. */
+  function applyIcons() {
+    document.querySelectorAll('#mode-tabs .mode-tab').forEach((tab) => {
+      tab.querySelector('.mt-icon').innerHTML = modeIcon(tab.dataset.mode);
+    });
+    for (const span of document.querySelectorAll('.ph-icon[data-ph]')) {
+      const svg = phIcon(span.dataset.ph, '');
+      if (svg) span.innerHTML = svg;
+    }
+    const swap = phIcon('arrows-down-up', '');
+    if (swap) $('btn-swap').innerHTML = '<span class="ph-icon">' + swap + '</span>';
+    const close = phIcon('x', '');
+    if (close) $('pc-close').innerHTML = '<span class="ph-icon">' + close + '</span>';
+    updateThemeButton();
+  }
+  applyIcons();
+  Promise.all(PH_NAMES.map(async (name) => {
+    try {
+      const res = await fetch('/_stage/icons/regular/' + name + '.svg');
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text.indexOf('<svg') !== -1) phCache[name] = text;
+    } catch (err) { /* stage not mounted — fallbacks stay */ }
+  })).then(applyIcons);
+
+  // ===================================================================
+  // Map app: search, route, zoom — the default experience
+  // ===================================================================
+
+  let searchMarker = null;
+  function dropMarker(lat, lon, label, withCaption) {
+    if (searchMarker) searchMarker.remove();
+    const pin = document.createElement('div');
+    pin.className = 'am-map-search-pin';
+    // Caption only when the basemap has no label of its own — otherwise the
+    // name would appear twice, once on the pin and once underneath it.
+    pin.innerHTML = '<i></i>' + (withCaption ? '<span>' + (label || '') + '</span>' : '');
+    searchMarker = new maplibregl.Marker({ element: pin, anchor: 'bottom' })
+      .setLngLat([lon, lat]).addTo(map.map);
+  }
+
+  // Online, street detail comes tile by tile out of the remote planet archive
+  // (server-side range requests), so browsing mints nothing at all — asking
+  // for a 25 MB region to look at four tiles was the wrong unit of work.
+  // Minting survives for one job: preparing an offline package, where the
+  // whole area really is needed on disk. `guaranteed_zoom` already reports the
+  // planet's depth when it is reachable, so the condition below is simply
+  // never true while online.
+  const DETAIL_ZOOM = 11;
+  const MINT_ZOOM = 15;
+  const minted = new Set();     // ids already tried, successfully or not
+  let minting = false;
+
+  /** Stable id for an unnamed viewport: one region per 0.1° cell (~11 km),
+   *  so panning across the country mints neighbours instead of overwriting
+   *  the same "kartenausschnitt" bundle again and again. */
+  function regionId(lat, lon) {
+    const part = (v, pos, neg) => Math.abs(v).toFixed(1).replace('.', '') + (v < 0 ? neg : pos);
+    return 'r' + part(lat, 'n', 's') + part(lon, 'e', 'w');
+  }
+
+  const coverageCache = new Map();   // "cell|zoom" -> guaranteed depth there
+
+  /** The box to ask about and to mint: what is actually on screen, padded, so
+   *  the minted region covers the view rather than a patch in the middle of
+   *  it. Capped, because a wide viewport at z11 would otherwise ask the
+   *  planet build for half a country. */
+  function viewBox(lat, lon) {
+    const b = map.map.getBounds();
+    const dLon = Math.min(Math.max((b.getEast() - b.getWest()) * 0.75, 0.16), 1.5);
+    const dLat = Math.min(Math.max((b.getNorth() - b.getSouth()) * 0.75, 0.10), 1.0);
+    return { west: lon - dLon, south: lat - dLat, east: lon + dLon, north: lat + dLat };
+  }
+
+  /** @param wantZoom the zoom the view is heading for — the live zoom is the
+   *  wrong answer during a flyTo, which is exactly when search calls this. */
+  async function ensureVectors(lat, lon, name, wantZoom) {
+    const box = viewBox(lat, lon);
+    const key = regionId(lat, lon) + '|' + Math.round(wantZoom);
+    let depth = coverageCache.get(key);
+    if (depth === undefined) {
+      try {
+        const res = await fetch('/api/v1/maps/vector/coverage?' + new URLSearchParams(box));
+        // The clamp must use what covers the WHOLE box: a freshly minted
+        // region touching one corner reports max_zoom 15, and setting the
+        // source to that turns the rest of the screen grey the moment the
+        // mint finishes.
+        depth = (await res.json()).guaranteed_zoom;
+      } catch (err) { return; }
+      coverageCache.set(key, depth);
+    }
+    // Always first: show the depth that exists rather than a grey hole.
+    map.setVectorDepth(depth);
+    // Minting is bulk provisioning: allowed only in "online" — "mixed" keeps
+    // search/routing/live-tiles live but must not silently mint a new region.
+    if (mode !== 'online') return;
+    if (wantZoom <= depth || wantZoom < DETAIL_ZOOM || minting) return;
+    const id = name
+      ? (name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+          .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || regionId(lat, lon))
+      : regionId(lat, lon);
+    if (minted.has(id)) return;
+    minted.add(id);
+    minting = true;
+    status('Straßendaten für ' + (name || 'diesen Bereich') + ' werden vorbereitet …', true);
+    try {
+      const res = await post('/api/v1/maps/vector/extract', Object.assign({ id, maxzoom: MINT_ZOOM }, box));
+      if (!res.ok) { status('Straßendaten nicht verfügbar (offline?)'); return; }
+      const info = await res.json();
+      coverageCache.clear();      // a new bundle changes the answer everywhere
+      map.reloadVectors();
+      // "auf dem Server": this is disk on the server, not a browser download —
+      // the old wording read as though the client had just pulled 25 MB.
+      status('Offline-Paket vorbereitet: ' + (info.size_bytes / 1048576).toFixed(0)
+             + ' MB auf dem Server, bis z' + info.max_zoom);
+    } finally { minting = false; }
+    // Re-ask rather than trusting the new bundle's own depth: it counts only
+    // where it actually covers, which is why the naive version turned the
+    // screen grey again the instant a mint completed.
+    ensureVectors(lat, lon, null, wantZoom);
+  }
+
+  // -- where "near me" means -------------------------------------------
+  // Ranking anchor for search. The map centre is the honest default: it is
+  // what the user is looking at, and it needs no permission at all. A device
+  // location only improves the very first search, before the map has been
+  // moved anywhere.
+  let coarseLocation = null;
+  const GEO_CHOICE_KEY = 'am-maps-geo-choice';
+
+  /** Ask once, remember the answer, and only when this really is one person's
+   *  own map. Mounted as a module in the platform host `standalone` is false
+   *  and this never runs — prompting every visitor of a shared deployment for
+   *  a permission that helps only the local user would be rude and useless. */
+  function maybeAskForLocation() {
+    if (!map.payload.standalone || mode === 'offline') return;
+    if (!navigator.geolocation || !window.isSecureContext) return;
+    if (localStorage.getItem(GEO_CHOICE_KEY) === 'denied') return;
+    if (coarseLocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        localStorage.setItem(GEO_CHOICE_KEY, 'granted');
+        coarseLocation = { lat: position.coords.latitude, lon: position.coords.longitude };
+      },
+      () => { localStorage.setItem(GEO_CHOICE_KEY, 'denied'); },
+      // Coarse on purpose: this ranks search results, it does not navigate.
+      // Low accuracy is faster, cheaper, and far less intrusive.
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 30 * 60 * 1000 },
+    );
+  }
+
+  /** The "locate me" control — bottom-right, next to zoom, the circular
+   *  target every map app has next to its zoom buttons. Reuses the same
+   *  isSecureContext/permission gate as the coarse background lookup above
+   *  rather than a second set of error handling; the only real difference is
+   *  accuracy (high here, since this one actually navigates the camera) and
+   *  that it always asks, even after the coarse lookup was declined once. */
+  let meMarker = null;
+  function locateMe() {
+    if (!navigator.geolocation || !window.isSecureContext) {
+      status('Standort nicht verfügbar (kein sicherer Kontext)');
+      return;
+    }
+    $('btn-locate').classList.add('active');
+    status('Standort wird ermittelt …', true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        $('btn-locate').classList.remove('active');
+        const { latitude: lat, longitude: lon } = position.coords;
+        coarseLocation = { lat, lon };
+        localStorage.setItem(GEO_CHOICE_KEY, 'granted');
+        if (meMarker) meMarker.remove();
+        const el = document.createElement('div');
+        el.className = 'am-map-me';
+        meMarker = new maplibregl.Marker({ element: el, anchor: 'center' })
+          .setLngLat([lon, lat]).addTo(map.map);
+        map.map.flyTo({ center: [lon, lat], zoom: 15, duration: 1400 });
+        status('Standort gefunden');
+      },
+      () => {
+        $('btn-locate').classList.remove('active');
+        localStorage.setItem(GEO_CHOICE_KEY, 'denied');
+        status('Standort nicht verfügbar — Berechtigung verweigert?');
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+    );
+  }
+  $('btn-locate').addEventListener('click', locateMe);
+
+  /** The point results are ranked against, and the box they are biased to.
+   *  The context menu's "In der Nähe suchen" pins the anchor to the clicked
+   *  spot (searchBias) until the next selection or reset. */
+  let searchBias = null;
+  function searchAnchor() {
+    const centre = map.map.getCenter();
+    const bounds = map.map.getBounds();
+    // Once the map has been moved somewhere deliberate, that beats the device
+    // location — you search for what you are looking at.
+    const near = searchBias
+      || ((map.map.getZoom() >= 6 || !coarseLocation)
+        ? { lat: centre.lat, lon: centre.lng }
+        : coarseLocation);
+    return {
+      near,
+      viewbox: {
+        west: bounds.getWest(), south: bounds.getSouth(),
+        east: bounds.getEast(), north: bounds.getNorth(),
+      },
+    };
+  }
+
+  async function lookup(query) {
+    if (mode === 'offline') return [];
+    const anchor = searchAnchor();
+    const needle = query.trim().toLowerCase();
+    // Three sources, ONE ranked list. Countries used to be pinned above
+    // everything, which is how typing "ha" in Hannover put Haiti first: a
+    // country is only the best answer when the query really names it.
+    const [countries, cities, places] = await Promise.all([
+      fetch('/api/v1/maps/geo/countries/search?lang=' + lang + '&q=' + encodeURIComponent(query))
+        .then((r) => r.ok ? r.json() : []).catch(() => []),
+      fetch('/api/v1/maps/geo/cities/search?q=' + encodeURIComponent(query)
+            + '&near_lat=' + anchor.near.lat + '&near_lon=' + anchor.near.lon + '&limit=6')
+        .then((r) => r.ok ? r.json() : []).catch(() => []),
+      post('/api/v1/maps/geocode', Object.assign({ q: query, lang }, anchor))
+        .then((r) => r.ok ? r.json() : []).catch(() => []),
+    ]);
+
+    const items = [];
+    for (const c of countries) {
+      const inIt = anchor.near.lat >= c.bbox.south && anchor.near.lat <= c.bbox.north
+        && anchor.near.lon >= c.bbox.west && anchor.near.lon <= c.bbox.east;
+      const exact = [c.label, c.name, ...Object.values(c.names || {})]
+        .some((n) => n && n.toLowerCase() === needle);
+      items.push({
+        kind: 'Land', title: c.label, sub: c.continent, country: c,
+        // An exactly named country outranks everything; a mere prefix hit
+        // ranks as one candidate among the nearby cities, not above them.
+        score: (exact ? 5 : 0.9) + (inIt ? 1.2 : 0)
+          + 1.2 * Math.exp(-distanceKm(anchor.near, { lat: c.center.lat, lon: c.center.lon }) / 2500),
+      });
+    }
+    for (const c of cities) {
+      items.push({
+        kind: 'Stadt', title: c.name, sub: c.country, distanceKm: c.distance_km,
+        place: { name: c.name, lat: c.lat, lon: c.lon, population: c.population },
+        score: c.score + 0.5,
+      });
+    }
+    for (const p of places) {
+      const d = distanceKm(anchor.near, p);
+      // Skip near-duplicates of an indexed city (Nominatim's "Hamburg, …"
+      // next to the index's Hamburg): the city entry is the cleaner answer.
+      if (cities.some((c) => distanceKm({ lat: c.lat, lon: c.lon }, p) < 3)) continue;
+      items.push({
+        kind: STREET_KINDS.indexOf(p.kind || '') !== -1 ? 'Straße' : 'Ort',
+        title: p.name.split(',')[0], sub: resultDetail(p), place: p,
+        distanceKm: d,
+        score: 0.4 + 1.6 * Math.exp(-d / 300),
+      });
+    }
+    return items.sort((a, b) => b.score - a.score).slice(0, 8);
+  }
+
+  // Nominatim types that name a STREET rather than a place — they get the
+  // signpost icon in the dropdown instead of the generic pin.
+  const STREET_KINDS = ['road', 'residential', 'pedestrian', 'primary',
+    'secondary', 'tertiary', 'motorway', 'trunk', 'service', 'living_street',
+    'unclassified', 'track', 'footway', 'path', 'cycleway', 'construction'];
+
+  /** Detail line for a geocoder hit: the structured address with its ZIP
+   *  ("Zeil, 60313 Frankfurt am Main") when one flows, else the full
+   *  display name Nominatim sent. */
+  function resultDetail(p) {
+    const addr = p.address;
+    if (!addr) return p.name;
+    const title = p.name.split(',')[0];
+    const road = [addr.road, addr.house_number].filter(Boolean).join(' ');
+    const town = [addr.postcode, addr.locality].filter(Boolean).join(' ');
+    const parts = [];
+    if (road && road !== title) parts.push(road);
+    if (town) parts.push(town);
+    return parts.length ? parts.join(', ') : p.name;
+  }
+
+  function distanceKm(origin, place) {
+    const rad = Math.PI / 180;
+    const meanLat = (origin.lat + place.lat) / 2 * rad;
+    const dx = (place.lon - origin.lon) * rad * Math.cos(meanLat);
+    const dy = (place.lat - origin.lat) * rad;
+    return Math.hypot(dx, dy) * 6371;
+  }
+
+  // -- result rows: one builder for the main dropdown AND the stop-field
+  //    autocomplete, so both look and behave identically. -----------------
+  const RESULT_ICON_FALLBACK = {
+    'globe-hemisphere-west': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.5 9h17M3.5 15h17M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></svg>',
+    buildings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 21V8l6-3v16M9 21V10l7 2v9M16 21V7l5 2v12M3 21h18"/></svg>',
+    signpost: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3v3M12 13v8M5 6h12l3 3.5L17 13H5z"/></svg>',
+  };
+  function resultIconFor(item) {
+    if (item.country) return phIcon('globe-hemisphere-west',
+      RESULT_ICON_FALLBACK['globe-hemisphere-west']);
+    if (item.kind === 'Stadt') return phIcon('buildings', RESULT_ICON_FALLBACK.buildings);
+    if (item.kind === 'Straße') return phIcon('signpost', RESULT_ICON_FALLBACK.signpost);
+    return phIcon('map-pin', STOP_GLYPH_FALLBACK.pin);
+  }
+  const fmtResultDist = (km) => (km < 1
+    ? Math.round(km * 1000) + ' m' : km.toFixed(km < 10 ? 1 : 0) + ' km');
+
+  function buildResultRow(item, onPick) {
+    const row = document.createElement('div');
+    row.className = 'result';
+    row.innerHTML = '<span class="ric">' + resultIconFor(item) + '</span>'
+      + '<span class="r-body"><b></b><span class="sub"></span></span>'
+      + (item.distanceKm != null
+          ? '<span class="dist">' + fmtResultDist(item.distanceKm) + '</span>' : '');
+    row.querySelector('b').textContent = item.title;
+    const sub = row.querySelector('.sub');
+    if (item.sub) sub.textContent = item.sub; else sub.remove();
+    // mousedown-preventDefault keeps the focused input focused, so the
+    // stop-field dropdown's blur handler cannot race the pick.
+    row.addEventListener('mousedown', (ev) => ev.preventDefault());
+    row.addEventListener('click', onPick);
+    // Map link: hovering a row pings its spot and raises its basemap label.
+    row.addEventListener('mouseenter', () => hoverSuggestion(item));
+    row.addEventListener('mouseleave', unhoverSuggestion);
+    return row;
+  }
+
+  // -- map-linked suggestions: subtle dots for in-viewport hits while the
+  //    dropdown is open; hover = throttled sonar ping + label raised with
+  //    max priority (highlightPlace forces overlap), undone on leave. ------
+  let suggestMarkers = [];
+  let suggestHighlighted = false;
+  let lastHoverPing = 0;
+  function clearSuggestions() {
+    for (const marker of suggestMarkers.splice(0)) marker.remove();
+    unhoverSuggestion();
+  }
+  function markSuggestionsOnMap(items) {
+    const bounds = map.map.getBounds();
+    for (const item of items) {
+      const p = item.place;
+      if (!p || !bounds.contains([p.lon, p.lat])) continue;
+      const dot = document.createElement('div');
+      dot.className = 'am-suggest-dot';
+      suggestMarkers.push(new maplibregl.Marker({ element: dot, anchor: 'center' })
+        .setLngLat([p.lon, p.lat]).addTo(map.map));
+    }
+  }
+  function hoverSuggestion(item) {
+    const p = item.place;
+    if (!p) return;
+    map.highlightPlace(item.title);
+    suggestHighlighted = true;
+    // Throttled: hover-scrubbing down the list must not stack sonar rings.
+    const now = Date.now();
+    if (now - lastHoverPing > 650) {
+      lastHoverPing = now;
+      map.pingAt([p.lon, p.lat], null, { ttl_ms: 1600 });
+    }
+  }
+  function unhoverSuggestion() {
+    if (!suggestHighlighted) return;
+    suggestHighlighted = false;
+    map.clearPlaceHighlight();
+  }
+
+  function renderResults(items) {
+    const box = $('results');
+    box.innerHTML = '';
+    clearSuggestions();
+    if (!items.length) { box.classList.remove('open'); return; }
+    for (const item of items) box.appendChild(buildResultRow(item, () => choose(item)));
+    markSuggestionsOnMap(items);
+    box.classList.add('open');
+  }
+
+  async function choose(item) {
+    // Selection ALWAYS closes and empties the dropdown at once, and cancels
+    // any lookup still in flight — a late response must not reopen the list
+    // over whatever surface comes next.
+    searchSeq += 1;
+    clearTimeout(searchTimer);
+    const resultsBox = $('results');
+    resultsBox.innerHTML = '';
+    resultsBox.classList.remove('open');
+    clearSuggestions();
+    searchBias = null;      // a "nearby" bias applies to one search round
+    if (item.country) {
+      // Typing a country frames it and traces its border.
+      map.highlightCountry(item.country);
+      $('q').value = item.country.label;
+      status(item.country.label + ' — Grenze hervorgehoben');
+      return;
+    }
+    const p = item.place;
+    map.clearCountry();
+    // Mid-routing a search pick IS the new destination — full routing mode,
+    // no detail card stacked on top of the open panel ("either or").
+    if ($('route-panel').classList.contains('open')) {
+      $('q').value = item.title;
+      addStop('end', { label: item.title, lat: p.lat, lon: p.lon });
+      return;
+    }
+    const zoom = p.population > 500000 ? 11.5 : p.population > 50000 ? 12.8 : 15;
+    map.map.flyTo({ center: [p.lon, p.lat], zoom, duration: 1600 });
+    dropMarker(p.lat, p.lon, item.title, true);
+    // Once the move settles, prefer the basemap's own label: highlight it and
+    // drop our caption so the name is not rendered twice.
+    map.map.once('idle', () => {
+      if (map.highlightPlace(item.title)) dropMarker(p.lat, p.lon, item.title, false);
+    });
+    $('q').value = item.title;
+    // The detail card replaces the old toast for places: name, kind, full
+    // address (the geocoder now sends a structured one), coordinates.
+    showPlaceCard({
+      name: item.title, kind: item.kind, lat: p.lat, lon: p.lon,
+      address: p.address || null,
+      // A city's "address" is its ZIP + name, not some building at its
+      // centre — composeAddress() drops road/number for city-level places.
+      cityLevel: item.kind === 'Stadt' || (p.kind || '') === 'administrative',
+    });
+    ensureVectors(p.lat, p.lon, item.title, 15);
+  }
+
+  let searchTimer = null;
+  // Monotonic token: every keystroke (and every selection) invalidates the
+  // lookups before it, so a slow response can never reopen the dropdown
+  // after the user already picked a result.
+  let searchSeq = 0;
+  $('q').addEventListener('input', (ev) => {
+    const query = ev.target.value.trim();
+    clearTimeout(searchTimer);
+    const seq = ++searchSeq;
+    if (query.length < 2) {
+      $('results').classList.remove('open');
+      clearSuggestions();
+      return;
+    }
+    // Countries answer locally and instantly; Nominatim is rate limited to
+    // 1 req/s, so typing is debounced rather than fired per keystroke.
+    searchTimer = setTimeout(async () => {
+      const items = await lookup(query);
+      if (seq === searchSeq) renderResults(items);
+    }, 350);
+  });
+  $('q').addEventListener('keydown', async (ev) => {
+    if (ev.key !== 'Enter') return;
+    const items = await lookup(ev.target.value.trim());
+    if (items.length) choose(items[0]);
+  });
+  // The clear button only exists while there is something to clear — an
+  // always-visible ✕ next to an empty field is just noise.
+  function syncClearButton() {
+    $('btn-clear').hidden = !$('q').value && !tripStops.some((s) => s.label);
+  }
+  $('q').addEventListener('input', syncClearButton);
+  $('q').addEventListener('focus', maybeAskForLocation, { once: true });
+  $('btn-clear').addEventListener('click', () => {
+    $('q').value = '';
+    $('results').classList.remove('open');
+    clearSuggestions();
+    searchBias = null;
+    map.clearCountry();
+    closePlaceCard();
+    clearTrip();
+    syncClearButton();
+  });
+
+  // ====================================================================
+  // Routing: an ordered list of stops, exactly like Google's
+  // ====================================================================
+  // One model, two ways in — the search box and the right-click menu both
+  // push into `tripStops`, so a trip assembled either way behaves identically.
+  // A stop is {label, lat, lon}; the first is the start, the last the
+  // destination, everything between is a via.
+  // Named `tripStops`, not `stops`: the scenario chrome already owns a
+  // `#stops` element and its own renderer, and a collision there cost an
+  // hour once.
+  let tripStops = [];
+  let stopMarkers = [];
+  let routeCapabilities = { avoid: [], departure_time_affects_route: false };
+  // The primary route currently on screen — kept so an alternates row can
+  // hand its own route (with its `alternates` list) to promoteAlternate().
+  let currentRoute = null;
+  const MODES = ['car', 'truck', 'walk', 'bike'];
+  let selectedMode = 'car';
+
+  // -- distance units ---------------------------------------------------
+  // "auto" is km for now (metric country); the choice reformats every
+  // displayed distance (alternates, steps, badges) but never durations.
+  const UNITS_KEY = 'am-maps-units';
+  let unitsSetting = localStorage.getItem(UNITS_KEY) || 'auto';
+  if (['auto', 'km', 'mi'].indexOf(unitsSetting) === -1) unitsSetting = 'auto';
+
+  // -- per-mode route cache --------------------------------------------
+  // One entry per (stops+options signature, mode). All four modes are fired
+  // in parallel as soon as the trip has coordinates; each entry keeps its
+  // promise so a tab click never refires what is already in flight, and the
+  // signature key makes stop/option changes invalidate by construction.
+  const routeCache = new Map();
+  let currentSig = null;
+  let routeSeq = 0;
+
+  /** Stops that can actually be routed: the ones with coordinates. A fully
+   *  empty row (freshly added, not yet filled) is simply skipped. */
+  function routableStops() { return tripStops.filter((s) => s.lat != null); }
+
+  /** null while routing must not fire: typed text still awaiting its
+   *  geocode, or fewer than two stops with coordinates. */
+  function tripSignature() {
+    if (tripStops.some((s) => s.lat == null && s.label)) return null;
+    const pts = routableStops();
+    if (pts.length < 2) return null;
+    const avoid = ['motorway', 'toll', 'ferry']
+      .filter((name) => $('avoid-' + name).checked && !$('avoid-' + name).disabled);
+    return JSON.stringify({
+      pts: pts.map((s) => [+s.lat.toFixed(6), +s.lon.toFixed(6)]),
+      avoid,
+    });
+  }
+
+  fetch('/api/v1/maps/routing/capabilities')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((caps) => { if (caps) { routeCapabilities = caps; applyCapabilities(); } })
+    .catch(() => {});
+
+  /** Only offer what the backend will actually honour. Silently dropping
+   *  "avoid motorways" would be worse than not offering it. */
+  function applyCapabilities() {
+    const supported = routeCapabilities.avoid || [];
+    for (const name of ['motorway', 'toll', 'ferry']) {
+      const box = $('avoid-' + name);
+      const usable = supported.indexOf(name) !== -1;
+      box.disabled = !usable;
+      box.parentElement.style.opacity = usable ? '1' : '0.45';
+      box.parentElement.title = usable ? '' :
+        'Dieser Routing-Server unterstützt das nicht (eigener OSRM nötig)';
+    }
+    const notes = [];
+    if (!supported.length) {
+      notes.push('Vermeidungs-Optionen brauchen einen eigenen OSRM-Server; '
+                 + 'der öffentliche Demo-Server lehnt sie ab.');
+    }
+    if (!routeCapabilities.departure_time_affects_route) {
+      notes.push('Die Abfahrtszeit verschiebt nur die Ankunft — '
+                 + 'OSRM kennt keine Verkehrslage, die Route bleibt gleich.');
+    }
+    $('options-note').textContent = notes.join(' ');
+  }
+
+  // Map-marker colours only (start green, via amber, destination red) — the
+  // PANEL rows carry icons instead, per Google: circle for start/vias, a map
+  // pin for the destination.
+  const STOP_COLOURS = ['#3fb27f', '#f2a33c', '#e2574c'];
+  function stopColour(index) {
+    if (index === 0) return STOP_COLOURS[0];
+    if (index === tripStops.length - 1) return STOP_COLOURS[2];
+    return STOP_COLOURS[1];
+  }
+  const STOP_GLYPH_FALLBACK = {
+    circle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="7"/></svg>',
+    pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 1113 0C18.5 14.8 12 21 12 21z"/><circle cx="12" cy="10" r="2.2"/></svg>',
+  };
+  function stopGlyph(index) {
+    return index === tripStops.length - 1
+      ? phIcon('map-pin', STOP_GLYPH_FALLBACK.pin)
+      : phIcon('circle', STOP_GLYPH_FALLBACK.circle);
+  }
+  function stopPlaceholder(index) {
+    if (index === 0) return 'Start';
+    if (index === tripStops.length - 1) return 'Ziel';
+    return 'Zwischenstopp';
+  }
+
+  // -- stop-field autocomplete ------------------------------------------
+  // One shared dropdown (#stop-suggest) for every stop input: the same
+  // merged ranked lookup as the main search box, positioned under the
+  // active field; a pick fills that stop with label + coordinates +
+  // address and the auto-route flow takes it from there.
+  const stopSuggest = $('stop-suggest');
+  let stopSuggestSeq = 0;
+  let stopSuggestTimer = null;
+
+  function hideStopSuggest() {
+    stopSuggestSeq += 1;              // invalidates lookups still in flight
+    clearTimeout(stopSuggestTimer);
+    stopSuggest.classList.remove('open');
+    stopSuggest.innerHTML = '';
+    clearSuggestions();
+  }
+
+  function positionStopSuggest(input) {
+    // #search-panel is the positioned ancestor of both the route panel and
+    // the dropdown, so the arithmetic stays local to it.
+    const panel = $('search-panel').getBoundingClientRect();
+    const rect = input.getBoundingClientRect();
+    stopSuggest.style.left = (rect.left - panel.left) + 'px';
+    stopSuggest.style.top = (rect.bottom - panel.top + 4) + 'px';
+    stopSuggest.style.width = Math.max(rect.width, 240) + 'px';
+  }
+
+  function pickStopSuggestion(stop, item) {
+    const p = item.place;
+    stop.label = item.title;
+    stop.lat = p.lat;
+    stop.lon = p.lon;
+    hideStopSuggest();
+    renderTripStops();
+    syncClearButton();
+    onTripChanged();                  // the auto-route flow
+  }
+
+  function wireStopSuggest(input, stop) {
+    input.addEventListener('input', () => {
+      const query = input.value.trim();
+      clearTimeout(stopSuggestTimer);
+      const seq = ++stopSuggestSeq;
+      if (query.length < 2 || mode === 'offline') {
+        stopSuggest.classList.remove('open');
+        stopSuggest.innerHTML = '';
+        return;
+      }
+      stopSuggestTimer = setTimeout(async () => {
+        // Countries are not routable stops — only coordinate hits qualify.
+        const items = (await lookup(query)).filter((it) => it.place);
+        if (seq !== stopSuggestSeq || document.activeElement !== input) return;
+        stopSuggest.innerHTML = '';
+        clearSuggestions();
+        if (!items.length) { stopSuggest.classList.remove('open'); return; }
+        for (const item of items) {
+          stopSuggest.appendChild(
+            buildResultRow(item, () => pickStopSuggestion(stop, item)));
+        }
+        markSuggestionsOnMap(items);
+        positionStopSuggest(input);
+        stopSuggest.classList.add('open');
+      }, 350);
+    });
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') { hideStopSuggest(); return; }
+      if (ev.key === 'Enter' && stopSuggest.classList.contains('open')) {
+        const first = stopSuggest.querySelector('.result');
+        if (first) { ev.preventDefault(); first.click(); }
+      }
+    });
+    // The rows' mousedown-preventDefault keeps focus here, so a real pick
+    // never races this; the timeout covers focus moving elsewhere. Focus
+    // moving to ANOTHER stop input must not cancel that input's own
+    // freshly debounced lookup.
+    input.addEventListener('blur', () => setTimeout(() => {
+      const active = document.activeElement;
+      if (active && active.closest && active.closest('#stops-list')) return;
+      hideStopSuggest();
+    }, 200));
+  }
+
+  // Index of the row currently being dragged, shared by all row handlers.
+  let dragIndex = null;
+  function renderTripStops() {
+    const list = $('stops-list');
+    list.innerHTML = '';
+    tripStops.forEach((stop, index) => {
+      const row = document.createElement('div');
+      row.className = 'route-row';
+      const dot = document.createElement('span');
+      dot.className = 'stop-glyph';
+      dot.innerHTML = stopGlyph(index);
+      const input = document.createElement('input');
+      input.value = stop.label || '';
+      input.placeholder = stopPlaceholder(index);
+      input.addEventListener('change', () => {
+        const text = input.value.trim();
+        // A dropdown pick just wrote this exact label WITH coordinates —
+        // the change event trailing the pick must not wipe them.
+        if (stop.lat != null && text === stop.label) return;
+        stop.label = text;
+        // Typed by hand, so the old coordinates no longer apply — the
+        // auto-route flow re-geocodes and reroutes on its own.
+        stop.lat = stop.lon = null;
+        syncClearButton();
+        onTripChanged();
+      });
+      // The same merged ranked suggestions as the main search box, docked
+      // under this stop field.
+      wireStopSuggest(input, stop);
+      row.appendChild(dot);
+      row.appendChild(input);
+      // Every row clears, Google's per-field ✕: with more than two stops it
+      // removes the row; at exactly two it empties the field — and once
+      // fewer than two resolved stops remain, the drawn route goes with it
+      // (onTripChanged handles that).
+      const drop = document.createElement('button');
+      drop.className = 'drop';
+      drop.textContent = '✕';
+      drop.title = tripStops.length > 2 ? 'Stopp entfernen' : 'Feld leeren';
+      drop.addEventListener('click', () => {
+        if (tripStops.length > 2) tripStops.splice(index, 1);
+        else { stop.label = ''; stop.lat = stop.lon = null; }
+        renderTripStops();
+        syncClearButton();
+        onTripChanged();
+      });
+      row.appendChild(drop);
+      // Drag to reorder — plain HTML5 drag & drop, no library. The row arms
+      // itself on pointerdown anywhere but the text input (so typing and
+      // text selection keep working); the glyph doubles as the visible
+      // handle. After a drop the glyphs re-derive: first row circle, last
+      // row map pin.
+      row.addEventListener('pointerdown', (ev) => {
+        if (ev.target !== input) row.draggable = true;
+      });
+      row.addEventListener('pointerup', () => { row.draggable = false; });
+      row.addEventListener('dragstart', (ev) => {
+        dragIndex = index;
+        row.classList.add('dragging');
+        ev.dataTransfer.effectAllowed = 'move';
+        try { ev.dataTransfer.setData('text/plain', String(index)); } catch (e) { /* optional */ }
+      });
+      row.addEventListener('dragend', () => {
+        dragIndex = null;
+        row.draggable = false;
+        list.querySelectorAll('.dragging, .drag-over, .drag-over-after').forEach(
+          (n) => n.classList.remove('dragging', 'drag-over', 'drag-over-after'));
+      });
+      const dropAfter = (ev) =>
+        ev.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+      row.addEventListener('dragover', (ev) => {
+        if (dragIndex === null) return;
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = 'move';
+        const after = dropAfter(ev);
+        row.classList.toggle('drag-over', !after && dragIndex !== index);
+        row.classList.toggle('drag-over-after', after && dragIndex !== index);
+      });
+      row.addEventListener('dragleave', () =>
+        row.classList.remove('drag-over', 'drag-over-after'));
+      row.addEventListener('drop', (ev) => {
+        if (dragIndex === null) return;
+        ev.preventDefault();
+        let to = index + (dropAfter(ev) ? 1 : 0);
+        if (to > dragIndex) to -= 1;      // removal shifts what follows
+        const [moved] = tripStops.splice(dragIndex, 1);
+        tripStops.splice(to, 0, moved);
+        dragIndex = null;
+        renderTripStops();
+        syncClearButton();
+        onTripChanged();
+      });
+      list.appendChild(row);
+    });
+    // Swap only for the simple A→B trip, Google's own rule.
+    $('btn-swap').hidden = tripStops.length !== 2;
+    drawStopMarkers();
+  }
+
+  function drawStopMarkers() {
+    for (const marker of stopMarkers.splice(0)) marker.remove();
+    tripStops.forEach((stop, index) => {
+      if (stop.lat == null) return;
+      const pin = document.createElement('div');
+      pin.className = 'am-map-search-pin';
+      pin.innerHTML = '<i style="background:' + stopColour(index) + '"></i>';
+      stopMarkers.push(new maplibregl.Marker({ element: pin, anchor: 'bottom' })
+        .setLngLat([stop.lon, stop.lat]).addTo(map.map));
+    });
+  }
+
+  function openRoutePanel() {
+    if (!tripStops.length) tripStops = [{ label: '', lat: null, lon: null },
+                                { label: '', lat: null, lon: null }];
+    // One primary surface at a time: entering routing dismisses the search
+    // dropdown and the detail card — never stacked.
+    $('results').classList.remove('open');
+    closePlaceCard();
+    $('route-panel').classList.add('open');
+    renderTripStops();
+    prefillStartWithLocation();
+  }
+
+  /** Google's "Your location": an empty start field assumes the device
+   *  location. Quietly — a denied permission just leaves the field empty
+   *  with its "Start" placeholder, no error toast for something the user
+   *  did not explicitly ask for. Never overwrites a start the user set. */
+  function prefillStartWithLocation() {
+    const start = tripStops[0];
+    if (!start || start.lat != null || start.label) return;
+    if (!navigator.geolocation || !window.isSecureContext) return;
+    if (localStorage.getItem(GEO_CHOICE_KEY) === 'denied') return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        // Re-check: the user may have typed a start while we waited.
+        if (!tripStops.length || tripStops[0].lat != null || tripStops[0].label) return;
+        tripStops[0] = {
+          label: 'Mein Standort',
+          lat: position.coords.latitude, lon: position.coords.longitude,
+        };
+        coarseLocation = { lat: tripStops[0].lat, lon: tripStops[0].lon };
+        localStorage.setItem(GEO_CHOICE_KEY, 'granted');
+        renderTripStops();
+        syncClearButton();
+        onTripChanged();
+      },
+      () => { localStorage.setItem(GEO_CHOICE_KEY, 'denied'); },
+      { enableHighAccuracy: false, timeout: 6000, maximumAge: 120000 },
+    );
+  }
+
+  function resetTabTimes() {
+    document.querySelectorAll('#mode-tabs .mt-time').forEach((n) => { n.textContent = '—'; });
+  }
+
+  function clearTrip() {
+    tripStops = [];
+    currentSig = null;
+    currentRoute = null;
+    hideStopSuggest();
+    map.clearRoutes();
+    for (const marker of stopMarkers.splice(0)) marker.remove();
+    $('route-panel').classList.remove('open');
+    $('route-result').classList.remove('open');
+    $('route-steps').classList.remove('open');
+    $('nav-start-row').classList.remove('open');
+    resetTabTimes();
+  }
+
+  /** Put a place into the trip. `role` mirrors the right-click menu. */
+  function addStop(role, place) {
+    openRoutePanel();
+    const entry = { label: place.label, lat: place.lat, lon: place.lon };
+    if (role === 'start') tripStops[0] = entry;
+    else if (role === 'end') tripStops[tripStops.length - 1] = entry;
+    else tripStops.splice(Math.max(1, tripStops.length - 1), 0, entry);
+    renderTripStops();
+    syncClearButton();
+    onTripChanged();
+  }
+
+  // Appends a new (empty) destination; the previous destination becomes a
+  // via stop by position, exactly like dragging in a new row at Google.
+  $('btn-add-stop').addEventListener('click', () => {
+    openRoutePanel();
+    tripStops.push({ label: '', lat: null, lon: null });
+    renderTripStops();
+    onTripChanged();
+  });
+  $('btn-swap').addEventListener('click', () => {
+    tripStops.reverse();
+    renderTripStops();
+    syncClearButton();
+    onTripChanged();
+  });
+  $('btn-route-options').addEventListener('click', () => {
+    $('route-options').classList.toggle('open');
+  });
+  for (const name of ['motorway', 'toll', 'ferry']) {
+    $('avoid-' + name).addEventListener('change', onTripChanged);
+  }
+  // Departure time shifts only the arrival arithmetic — re-render, no refetch.
+  $('depart-at').addEventListener('change', () => {
+    if (currentRoute) renderRouteResult(currentRoute);
+  });
+
+  // Units: persist, then reformat everything currently on screen. The badge
+  // on the map is redrawn by re-adding the same route object.
+  for (const radio of document.querySelectorAll('#units-opt input[name=units]')) {
+    radio.checked = radio.value === unitsSetting;
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      unitsSetting = radio.value;
+      localStorage.setItem(UNITS_KEY, unitsSetting);
+      if (currentRoute) {
+        map.clearRoutes();
+        map.addRoute(currentRoute);
+        drawStopMarkers();
+        renderRouteResult(currentRoute);
+      }
+    });
+  }
+
+  async function geocodeOne(text) {
+    if (mode === 'offline') return null;
+    const res = await post('/api/v1/maps/geocode', { q: text, lang });
+    if (!res.ok) return null;
+    const hits = await res.json();
+    return hits.length ? hits[0] : null;
+  }
+
+  /** Resolve every stop that only has text so far. Fully empty rows are
+   *  fine — they are simply not part of the route yet. */
+  async function resolveStops() {
+    for (const stop of tripStops) {
+      if (stop.lat != null) continue;
+      if (!stop.label) continue;
+      const hit = await geocodeOne(stop.label);
+      if (!hit) { status('Adresse nicht gefunden: ' + stop.label); return null; }
+      stop.lat = hit.lat; stop.lon = hit.lon;
+      if (!stop.label) stop.label = hit.name;
+    }
+    return tripStops;
+  }
+
+  /** Distance for display, honouring the units choice ("auto" = km). */
+  function fmtDistance(metres) {
+    if (unitsSetting === 'mi') {
+      const miles = metres / 1609.344;
+      if (miles >= 0.1) return miles.toFixed(miles < 10 ? 1 : 0) + ' mi';
+      return Math.round(metres * 3.28084 / 10) * 10 + ' ft';
+    }
+    return metres >= 1000
+      ? (metres / 1000).toFixed(metres < 10000 ? 1 : 0) + ' km'
+      : Math.round(metres / 10) * 10 + ' m';
+  }
+  const fmtDuration = (minutes) => {
+    const hours = Math.floor(minutes / 60), rest = Math.round(minutes % 60);
+    return (hours ? hours + ' h ' : '') + rest + ' min';
+  };
+  // Under a mode tab: "24 min", "2 h 25" — compact, Google's shape.
+  const fmtTabTime = (minutes) => {
+    const hours = Math.floor(minutes / 60), rest = Math.round(minutes % 60);
+    return hours ? hours + ' h ' + rest : rest + ' min';
+  };
+  // Step secondary line: "41 Sek.", "3 Min." — German abbreviations.
+  const fmtStepDuration = (seconds) => (seconds >= 60
+    ? Math.round(seconds / 60) + ' Min.' : Math.round(seconds) + ' Sek.');
+
+  // The map badge shows the same distance text as the panel — the hook in
+  // map.js lets the units setting reach it without forking the renderer.
+  map.formatDistance = (km) => fmtDistance(km * 1000);
+
+  function tabTimeNode(mode) {
+    return document.querySelector('#mode-tabs .mode-tab[data-mode="' + mode + '"] .mt-time');
+  }
+
+  /** Fire (or reuse) the request for one mode of the given signature. */
+  function fetchRouteFor(mode, sig) {
+    const key = sig + '|' + mode;
+    let entry = routeCache.get(key);
+    if (entry) return entry;
+    const parsed = JSON.parse(sig);
+    const stops = parsed.pts.map(([lat, lon]) => ({ lat, lon }));
+    const named = routableStops();
+    const body = {
+      route_id: 'app-' + mode + '-' + (++routeSeq), mode,
+      start: stops[0],
+      end: stops[stops.length - 1],
+      via: stops.slice(1, -1),
+      from_location: (named[0] || {}).label || '',
+      to_location: (named[named.length - 1] || {}).label || '',
+      steps: true, avoid: parsed.avoid,
+      // Google's own convention: always ask, show them when there are any.
+      // Ignored server-side wherever the backend or the request shape
+      // cannot honour it (OSRM, or a multi-stop trip) — see RouteRequest.
+      alternates: 2,
+    };
+    entry = {};
+    entry.promise = post('/api/v1/maps/route', body).then(async (res) => {
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || 'nicht verfügbar');
+      }
+      entry.route = await res.json();
+      return entry.route;
+    });
+    routeCache.set(key, entry);
+    return entry;
+  }
+
+  /** All four modes in parallel; tab times fill in as responses land, and
+   *  the selected mode's route is drawn. Cached entries resolve instantly,
+   *  so nothing refires on a rerender with an unchanged trip. */
+  function requestAllModes() {
+    const sig = tripSignature();
+    if (!sig || mode === 'offline') return;
+    if (sig !== currentSig) { currentSig = sig; resetTabTimes(); }
+    for (const m of MODES) {
+      fetchRouteFor(m, sig).promise.then((route) => {
+        if (sig !== currentSig) return;      // trip changed while in flight
+        tabTimeNode(m).textContent = fmtTabTime(route.duration_min);
+        if (m === selectedMode) drawRoute(route);
+      }).catch((err) => {
+        if (sig !== currentSig) return;
+        tabTimeNode(m).textContent = '—';
+        if (m === selectedMode) status('Routing fehlgeschlagen: ' + err.message);
+      });
+    }
+  }
+
+  /** Trip or options changed: auto-route. Debounced (~300 ms) so a burst of
+   *  changes — a reorder's re-render, a drop plus its glyph pass, several
+   *  option flips — fires exactly one recompute. There is no Route button
+   *  any more; this IS the routing trigger. */
+  let tripTimer = null;
+  let tripSeq = 0;
+  function onTripChanged() {
+    clearTimeout(tripTimer);
+    tripTimer = setTimeout(applyTripChange, 300);
+  }
+
+  async function applyTripChange() {
+    const seq = ++tripSeq;
+    // Typed addresses resolve automatically (the Route button used to do
+    // this): geocode every stop that only has text, then route.
+    if (mode !== 'offline' && tripStops.some((s) => s.lat == null && s.label)) {
+      status('Adresse wird gesucht …', true);
+      const resolved = await resolveStops();
+      if (seq !== tripSeq) return;       // the user kept editing meanwhile
+      if (resolved) {
+        $('status').classList.remove('open');
+        renderTripStops();
+        syncClearButton();
+      }
+    }
+    const sig = tripSignature();
+    if (sig === currentSig) return;
+    if (!sig) {
+      currentSig = null;
+      resetTabTimes();
+      // Fewer than two resolved stops and nothing pending: no route may
+      // stand (the 2-stop ✕ empties a field and the drawn line goes too).
+      // A failed geocode keeps its text pending and the old route standing.
+      if (!tripStops.some((s) => s.lat == null && s.label) && currentRoute) {
+        currentRoute = null;
+        map.clearRoutes();
+        drawStopMarkers();
+        $('route-result').classList.remove('open');
+        $('route-steps').classList.remove('open');
+        $('nav-start-row').classList.remove('open');
+      }
+      return;
+    }
+    requestAllModes();
+  }
+
+  function drawRoute(route, opts) {
+    if (!$('route-panel').classList.contains('open')) return;
+    currentRoute = route;
+    map.clearRoutes();
+    map.addRoute(route);
+    drawStopMarkers();
+    renderRouteResult(route);
+    if (navigation && navigation.isActive()) {
+      // Mid-drive recompute (the nav route-options panel changed the trip):
+      // the sim adopts the new geometry in place — marker re-snapped, nav
+      // route emphasis re-applied — and the follow camera keeps the stage,
+      // so no fitBounds tug-of-war.
+      navigation.updateRoute(route);
+    } else if (!(opts && opts.noFit)) {
+      // noFit: a live session update must not yank the camera — the
+      // caller decides (only an entirely off-screen route gets a fit).
+      const lons = route.geometry.map((p) => p.lon), lats = route.geometry.map((p) => p.lat);
+      map.map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+        { padding: 90, duration: 1400 });
+    }
+    $('status').classList.remove('open');
+  }
+
+  function selectMode(m) {
+    selectedMode = m;
+    document.querySelectorAll('#mode-tabs .mode-tab')
+      .forEach((tab) => tab.classList.toggle('active', tab.dataset.mode === m));
+    const sig = tripSignature();
+    if (!sig || mode === 'offline') return;
+    const entry = routeCache.get(sig + '|' + m);
+    // Cached: instant swap. Not yet: requestAllModes covers this mode too.
+    if (entry && entry.route) drawRoute(entry.route);
+    else requestAllModes();
+  }
+  document.querySelectorAll('#mode-tabs .mode-tab').forEach((tab) => {
+    tab.addEventListener('click', () => selectMode(tab.dataset.mode));
+  });
+  selectMode(selectedMode);
+
+  // No "Route"/"Löschen" buttons: typed addresses resolve and route through
+  // applyTripChange automatically, clearing lives on each row's ✕ and on the
+  // search box's Zurücksetzen (clearTrip).
+
+  function renderRouteResult(route) {
+    currentRoute = route;
+    const depart = $('depart-at').value;
+    let arrival = '';
+    if (depart) {
+      // OSRM has no traffic model, so this is arithmetic on the clock and
+      // nothing more — said plainly rather than dressed up as an ETA.
+      const [h, m] = depart.split(':').map(Number);
+      const at = new Date(2000, 0, 1, h, m + Math.round(route.duration_min));
+      arrival = ' · Ankunft ca. ' + String(at.getHours()).padStart(2, '0')
+        + ':' + String(at.getMinutes()).padStart(2, '0');
+    }
+    // The fuller via chain (top ~4, priority-ordered) belongs to the detail
+    // summary — the "long route version"; the candidate rows below stay
+    // brief (max two landmarks each).
+    const chain = (route.via_places || []).slice(0, 4).map((p) => p.name).join(' · ');
+    $('route-result').innerHTML = '<b>' + fmtDuration(route.duration_min) + '</b> · '
+      + fmtDistance(route.distance_km * 1000) + arrival
+      + (chain ? '<br><span class="sub">über ' + escText(chain) + '</span>' : '')
+      + '<br><span class="sub">ohne Verkehrslage (freie Fahrt)</span>'
+      + '<div id="route-alternates"></div>';
+    $('route-result').classList.add('open');
+    // A drawn route can be driven: the blue Start enters navigation mode.
+    $('nav-start-row').classList.add('open');
+    renderAlternates(route);
+    renderSteps(route);
+  }
+
+  /** The most useful street name on a route: OSRM/Valhalla give one `name`
+   *  per step, and the longest-held one is normally the road that actually
+   *  carries the trip (Google's "via A8"). Empty when nothing is named
+   *  (unnamed tracks) or steps were never fetched. */
+  /** "über X", Google-style: X must tell the candidates APART. Both routes
+   *  to the same address share their first and last streets, so the longest
+   *  step overall names the destination's street for every row ("über
+   *  Niederräder Ufer" twice). Instead: the longest step whose road does
+   *  not appear in any OTHER candidate — the A81 leg, not the shared exit.
+   *  Falls back to the longest step when everything is shared (identical
+   *  candidates, or no others given). */
+  function routeViaLabel(route, others) {
+    // A step's road identity: the route number where there is one ("A 81",
+    // first segment of "A 81; A 6"), else the street name — German motorways
+    // carry NO name, only a ref, and the motorway is exactly the road a
+    // "via" label is about.
+    const roadOf = (s) => ((s.ref || '').split(';')[0] || s.name || '').trim();
+    const named = (route.steps || []).filter((s) => roadOf(s));
+    if (!named.length) return '';
+    const longest = (steps) => steps.reduce((a, b) => (b.distance_m > a.distance_m ? b : a));
+    const elsewhere = new Set();
+    for (const other of others || []) {
+      for (const s of (other.steps || [])) if (roadOf(s)) elsewhere.add(roadOf(s));
+    }
+    const unique = named.filter((s) => !elsewhere.has(roadOf(s)));
+    return roadOf(longest(unique.length ? unique : named));
+  }
+
+  const escText = (s) => String(s).replace(/[<>&"]/g,
+    (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+  /** Brief PLACE version of "über X" (max two landmarks), the owner's rule:
+   *  the server's `via_places` list is priority-ordered, and the label
+   *  prefers the highest-priority place NOT shared with the other
+   *  candidates — "über Pforzheim" vs "über Heilbronn". When the top place
+   *  is shared, the distinguishing one LEADS and the shared landmark
+   *  follows ("Pforzheim und Heidelberg"); when nothing distinguishes, the
+   *  shared top place is all there is to say. Empty without via places
+   *  (the road label steps up). */
+  function placeViaLabel(route, others) {
+    const places = route.via_places || [];
+    if (!places.length) return '';
+    const elsewhere = new Set();
+    for (const other of others || []) {
+      for (const p of (other.via_places || [])) elsewhere.add(p.name);
+    }
+    const unique = places.filter((p) => !elsewhere.has(p.name));
+    if (!unique.length) return places[0].name;
+    if (!elsewhere.has(places[0].name)) return places[0].name;
+    return unique[0].name + ' und ' + places[0].name;
+  }
+
+  /** Google's route list: one row per candidate — mode icon, "über A8",
+   *  duration bold-green, distance beneath. The current primary route is the
+   *  marked first row; clicking another promotes it by index, which is
+   *  exactly what map.promoteAlternate() takes. With zero alternates (the
+   *  OSRM demo) the summary line above stands alone — no empty-state rows. */
+  function renderAlternates(route) {
+    const box = $('route-alternates');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!route.alternates || !route.alternates.length) return;
+    const rows = [{ r: route, primary: true },
+      ...route.alternates.map((alt, index) => ({ r: alt, index }))];
+    for (const { r, primary, index } of rows) {
+      const others = rows.filter((o) => o.r !== r).map((o) => o.r);
+      // PRIMARY label: the brief place version ("über Pforzheim"); the
+      // road-based label ("über A 8") demotes to the secondary line. With
+      // no via places the road label is primary again, as before.
+      const place = placeViaLabel(r, others);
+      const road = routeViaLabel(r, others);
+      const primaryLabel = place || road;
+      const row = document.createElement('div');
+      row.className = 'alt-row' + (primary ? ' active' : '');
+      row.innerHTML = '<span class="ar-icon">' + modeIcon(route.mode) + '</span>'
+        + '<span class="ar-via"><span class="ar-place">'
+        + (primaryLabel ? 'über ' + escText(primaryLabel) : 'Route') + '</span>'
+        + (place && road ? '<span class="ar-road">über ' + escText(road) + '</span>' : '')
+        + '</span>'
+        + '<span class="ar-metrics"><b>' + fmtDuration(r.duration_min) + '</b>'
+        + '<span>' + fmtDistance(r.distance_km * 1000) + '</span></span>';
+      if (!primary) {
+        row.title = 'Als Route wählen';
+        // The refresh happens in the 'agentic-map:route-promoted' listener
+        // below — the same path a click on the drawn alternate line takes, so
+        // the panel can never disagree with the map about which route stands.
+        row.addEventListener('click', () => map.promoteAlternate(currentRoute, index));
+      }
+      box.appendChild(row);
+    }
+  }
+
+  // Fired by the runtime for BOTH promote entry points (panel chip, click on
+  // the dimmed line on the map). Without this, promoting by line click left
+  // the duration/steps panel showing the previous route.
+  map.el.addEventListener('agentic-map:route-promoted', (ev) => {
+    const promoted = ev.detail.route;
+    // The cache must follow the promotion, or the next tab round-trip would
+    // resurrect the demoted line — and the tab time changes with the route.
+    if (currentSig) {
+      const entry = routeCache.get(currentSig + '|' + selectedMode);
+      if (entry) { entry.route = promoted; entry.promise = Promise.resolve(promoted); }
+      const node = tabTimeNode(selectedMode);
+      if (node) node.textContent = fmtTabTime(promoted.duration_min);
+    }
+    drawStopMarkers();
+    renderRouteResult(promoted);
+    if (navigation && navigation.isActive()) {
+      // Promoted from the in-nav options panel: drive on along the new
+      // primary — the follow camera keeps the stage, no reframing.
+      navigation.updateRoute(promoted);
+    } else {
+      const lons = promoted.geometry.map((p) => p.lon), lats = promoted.geometry.map((p) => p.lat);
+      map.map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+        { padding: 90, duration: 900 });
+    }
+  });
+
+  // Maneuver glyphs. Drawn rather than emoji so they stay legible at 22 px and
+  // match the map's own line weight; the roundabout carries its exit number,
+  // which is the one thing you actually need at the junction.
+  function maneuverGlyph(step) {
+    const stroke = 'fill="none" stroke="currentColor" stroke-width="2" '
+      + 'stroke-linecap="round" stroke-linejoin="round"';
+    const arrow = (d) => '<svg viewBox="0 0 24 24" ' + stroke + '><path d="' + d + '"/></svg>';
+    const type = step.type || '';
+    const modifier = step.modifier || '';
+    if (type === 'depart') return arrow('M12 21V6M12 6l-4 4M12 6l4 4');
+    if (type === 'arrive') return '<svg viewBox="0 0 24 24" ' + stroke
+      + '><circle cx="12" cy="10" r="3"/><path d="M12 21c4-6 6-8.5 6-11a6 6 0 10-12 0c0 2.5 2 5 6 11z"/></svg>';
+    if (type.indexOf('roundabout') !== -1 || type === 'rotary') {
+      const label = step.exit ? '<text x="12" y="9" text-anchor="middle" font-size="8"'
+        + ' fill="currentColor" stroke="none" font-weight="700">' + step.exit + '</text>' : '';
+      return '<svg viewBox="0 0 24 24" ' + stroke
+        + '><circle cx="12" cy="13" r="5"/><path d="M12 22v-4"/><path d="M17 13h4"/>'
+        + label + '</svg>';
+    }
+    if (type === 'merge') return arrow('M6 21V13c0-3 6-3 6-7V3M12 3l-3 3M12 3l3 3');
+    if (type === 'fork') return arrow(modifier.indexOf('left') !== -1
+      ? 'M12 21v-7L7 8V3M7 3L4 6M7 3l3 3' : 'M12 21v-7l5-6V3M17 3l-3 3M17 3l3 3');
+    if (modifier.indexOf('sharp left') !== -1) return arrow('M12 21V10H6M6 10l4-4M6 10l4 4');
+    if (modifier.indexOf('sharp right') !== -1) return arrow('M12 21V10h6M18 10l-4-4M18 10l-4 4');
+    if (modifier.indexOf('slight left') !== -1) return arrow('M12 21v-8l-4-4V5M8 5L5 8M8 5l3 3');
+    if (modifier.indexOf('slight right') !== -1) return arrow('M12 21v-8l4-4V5M16 5l3 3M16 5l-3 3');
+    if (modifier.indexOf('left') !== -1) return arrow('M12 21v-9H6M6 12l4-4M6 12l4 4');
+    if (modifier.indexOf('right') !== -1) return arrow('M12 21v-9h6M18 12l-4-4M18 12l-4 4');
+    if (modifier.indexOf('uturn') !== -1) return arrow('M8 21V12a4 4 0 018 0v4M16 16l-3-3M16 16l3-3');
+    return arrow('M12 21V6M12 6l-4 4M12 6l4 4');
+  }
+
+  /** OSRM speaks maneuver types, not sentences — the wording lives here,
+   *  where the label language is known. */
+  function instructionText(step) {
+    const onto = step.name ? ' auf ' + step.name : '';
+    const side = step.modifier.indexOf('left') !== -1 ? 'links'
+      : step.modifier.indexOf('right') !== -1 ? 'rechts' : '';
+    switch (step.type) {
+      case 'depart': return 'Losfahren' + onto;
+      case 'arrive': return 'Ziel erreicht';
+      case 'roundabout':
+      case 'rotary':
+      case 'exit roundabout':
+        return step.exit ? 'Im Kreisverkehr die ' + step.exit + '. Ausfahrt nehmen' + onto
+                         : 'Kreisverkehr' + onto;
+      case 'merge': return 'Auffahren' + onto;
+      case 'fork': return (side ? side + ' halten' : 'Weiterfahren') + onto;
+      case 'end of road': return (side ? side + ' abbiegen' : 'Weiterfahren') + onto;
+      case 'new name': return 'Weiter' + onto;
+      case 'continue': return 'Geradeaus weiter' + onto;
+      default:
+        if (step.modifier.indexOf('uturn') !== -1) return 'Wenden' + onto;
+        if (side) return side + ' abbiegen' + onto;
+        return 'Weiter' + onto;
+    }
+  }
+
+  function renderSteps(route) {
+    const box = $('route-steps');
+    box.innerHTML = '';
+    if (!route.steps || !route.steps.length) { box.classList.remove('open'); return; }
+    // Legs are the stop-to-stop sections; heading each one keeps a multi-stop
+    // trip readable instead of one long undifferentiated list. With several
+    // legs each header names its section ("Abschnitt 1 · Start → Hannover")
+    // and carries the colour chip of its line on the map.
+    let legIndex = 0, sinceLegStart = 0;
+    const multiLeg = (route.legs || []).length > 1;
+    const esc = (s) => String(s).replace(/[<>&"]/g,
+      (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+    const stopName = (i) => {
+      const total = (route.stops || []).length;
+      // Labels only when the panel rows still describe this exact route.
+      const rows = routableStops();
+      const label = rows.length === total && rows[i] && rows[i].label;
+      if (label) return label;
+      return i === 0 ? 'Start' : i === total - 1 ? 'Ziel' : 'Stopp ' + i;
+    };
+    route.steps.forEach((step) => {
+      if (step.type === 'depart') {
+        const head = document.createElement('div');
+        head.className = 'step-leg' + (multiLeg ? ' named' : '');
+        const leg = route.legs[legIndex];
+        if (multiLeg) {
+          head.innerHTML = '<span class="leg-chip" style="background:'
+            + map.legColor(route, legIndex) + '"></span>'
+            + 'Abschnitt ' + (legIndex + 1) + ' · '
+            + esc(stopName(legIndex)) + ' → ' + esc(stopName(legIndex + 1))
+            + (leg ? ' — ' + fmtDuration(leg.duration_min) + ' · '
+                     + fmtDistance(leg.distance_km * 1000) : '');
+        } else {
+          head.textContent = (legIndex === 0 ? 'Start' : 'Stopp ' + legIndex)
+            + (leg ? ' — ' + fmtDuration(leg.duration_min) + ', ' + fmtDistance(leg.distance_km * 1000) : '');
+        }
+        box.appendChild(head);
+        legIndex += 1; sinceLegStart = 0;
+      }
+      // Google's row: glyph | instruction | "41 Sek. (160 m)" underneath.
+      // The arrive step has no onward distance, so it gets no secondary line.
+      const sub = step.distance_m
+        ? '<span class="step-sub">' + fmtStepDuration(step.duration_s || 0)
+          + ' (' + fmtDistance(step.distance_m) + ')</span>'
+        : '';
+      const row = document.createElement('div');
+      row.className = 'step';
+      row.innerHTML = '<span class="glyph">' + maneuverGlyph(step) + '</span>'
+        + '<span class="step-body"><span class="step-main">' + instructionText(step)
+        + '</span>' + sub + '</span>';
+      // Clicking an instruction flies to the junction, like Google.
+      if (step.location) {
+        row.style.cursor = 'pointer';
+        row.addEventListener('click', () => map.map.flyTo({
+          center: [step.location.lon, step.location.lat], zoom: 17, duration: 900,
+        }));
+      }
+      box.appendChild(row);
+      sinceLegStart += 1;
+    });
+    box.classList.add('open');
+  }
+
+  // -- right-click on the map ------------------------------------------
+  const menu = $('map-menu');
+  let menuAt = null;
+  map.map.on('contextmenu', (event) => {
+    closePlaceCard();
+    menuAt = event.lngLat;
+    $('menu-coord-text').textContent =
+      menuAt.lat.toFixed(5) + ', ' + menuAt.lng.toFixed(5);
+    // Keep it on screen when the click lands near an edge.
+    const box = map.el.getBoundingClientRect();
+    menu.style.left = Math.min(event.point.x, box.width - 250) + 'px';
+    menu.style.top = Math.min(event.point.y, box.height - 340) + 'px';
+    menu.classList.add('open');
+  });
+  const closeMenu = () => menu.classList.remove('open');
+  map.map.on('movestart', closeMenu);
+  map.map.on('click', closeMenu);
+  document.addEventListener('click', (event) => {
+    if (!menu.contains(event.target)) closeMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeMenu();
+  });
+
+  /** Clipboard with a fallback: the async API needs a secure context, and
+   *  the plain-HTTP dev server is not one — the textarea path covers it. */
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok;
+      } catch (err2) { return false; }
+    }
+  }
+
+  menu.addEventListener('click', async (event) => {
+    // closest(), not event.target.dataset: with an icon inside every entry
+    // the click target is usually the SVG, not the button.
+    const btn = event.target.closest('#map-menu button');
+    if (!btn || !menuAt) return;
+    const coordLabel = menuAt.lat.toFixed(5) + ', ' + menuAt.lng.toFixed(5);
+    const place = { lat: menuAt.lat, lon: menuAt.lng, label: coordLabel };
+    // Coordinates header: copy, brief "Kopiert" feedback, then close.
+    if (btn.id === 'menu-coord') {
+      const ok = await copyText(coordLabel);
+      $('menu-coord-text').textContent = ok ? 'Kopiert' : coordLabel;
+      setTimeout(closeMenu, ok ? 650 : 100);
+      return;
+    }
+    const role = btn.dataset.role;
+    if (!role) return;
+    closeMenu();
+    if (role === 'centre') { map.map.flyTo({ center: [place.lon, place.lat], duration: 800 }); return; }
+    if (role === 'share') {
+      // The URL-state syntax the address bar already speaks, centred on the
+      // clicked spot — pasting it reproduces exactly this place.
+      const url = location.origin + location.pathname
+        + '#@' + place.lat.toFixed(5) + ',' + place.lon.toFixed(5) + ','
+        + (+map.map.getZoom().toFixed(2)) + 'z&view=' + currentView + '&lang=' + lang;
+      status((await copyText(url)) ? 'Link kopiert — Karte an dieser Stelle'
+                                   : 'Kopieren nicht möglich');
+      return;
+    }
+    if (role === 'nearby') {
+      // Bias the main search to this spot (searchAnchor honours it) and put
+      // the cursor in the box, ready to type.
+      searchBias = { lat: place.lat, lon: place.lon };
+      $('q').focus();
+      $('q').select();
+      status('Suche bezogen auf ' + coordLabel);
+      return;
+    }
+    if (role === 'whatishere') { whatIsHere(place); return; }
+    // start / via / end: a right-click gives coordinates; a name is nicer,
+    // so ask for one and fall back to the numbers when nothing is found.
+    addStop(role, place);
+    if (mode !== 'offline') {
+      const named = await post('/api/v1/maps/reverse-geocode',
+                              { lat: place.lat, lon: place.lon, lang })
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (named && named.name) applyResolvedName(place.lat, place.lon, named.name);
+    }
+  });
+
+  /** "Was ist hier?": reverse-geocode the point and open the place detail
+   *  card with street + ZIP — the card opens instantly on the coordinates,
+   *  the resolved name and address patch in when they land. */
+  async function whatIsHere(place) {
+    closePlaceCard();
+    const pinEl = document.createElement('div');
+    pinEl.className = 'am-map-search-pin';
+    pinEl.innerHTML = '<i></i>';
+    clickPin = new maplibregl.Marker({ element: pinEl, anchor: 'bottom' })
+      .setLngLat([place.lon, place.lat]).addTo(map.map);
+    // address:{} suppresses the card's own reverse-geocode — this flow does
+    // one lookup and patches name AND address from it.
+    const shown = { name: place.label, kind: '', lat: place.lat, lon: place.lon,
+                    address: {}, cityLevel: false };
+    showPlaceCard(shown);
+    if (mode === 'offline') return;
+    const named = await post('/api/v1/maps/reverse-geocode',
+                             { lat: place.lat, lon: place.lon, lang })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    if (!named || currentPlace !== shown) return;
+    const addr = named.address || null;
+    shown.address = addr;
+    const title = addr && addr.road
+      ? [addr.road, addr.house_number].filter(Boolean).join(' ')
+      : (named.name || '').split(',')[0];
+    if (title) $('pc-name').textContent = title;
+    const text = composeAddress(addr, false);
+    if (text) {
+      $('pc-address').textContent = text;
+      $('pc-address').style.display = '';
+    }
+  }
+
+  /** Shared by the right-click menu above and the click-drop card below:
+   *  once a reverse-geocode answer lands, patch whichever trip stop was
+   *  created at that exact coordinate (the stop is added synchronously, the
+   *  name arrives later — this is the second half of that). */
+  function applyResolvedName(lat, lon, name) {
+    const entry = tripStops.find((s) => s.lat === lat && s.lon === lon);
+    if (!entry) return;
+    entry.label = name;
+    renderTripStops();
+    syncClearButton();
+    // The leg headers ("Abschnitt 1 · A → B") name the stops too — a name
+    // that arrives after the route was drawn must reach them as well.
+    if (currentRoute) renderRouteResult(currentRoute);
+  }
+
+  // -- place detail card: search results and POI clicks land here --------
+  // Docked under the search box (not a map popup), Google's compact card:
+  // name, kind, full address with ZIP, coordinates, route shortcuts.
+  let clickPin = null;         // POI-click pin; search results own searchMarker
+  let currentPlace = null;
+
+  /** German display line from the structured geocoder address:
+   *  "Im Schwöllbogen 19, 72581 Dettingen an der Erms". City-level places
+   *  drop road/house number — a city is not the building at its centre. */
+  function composeAddress(addr, cityLevel) {
+    if (!addr) return '';
+    const road = [addr.road, addr.house_number].filter(Boolean).join(' ');
+    const town = [addr.postcode, addr.locality].filter(Boolean).join(' ');
+    if (cityLevel || !road) return town;
+    return town ? road + ', ' + town : road;
+  }
+
+  function closePlaceCard() {
+    currentPlace = null;
+    $('place-card').classList.remove('open');
+    if (clickPin) { clickPin.remove(); clickPin = null; }
+    if (searchMarker) { searchMarker.remove(); searchMarker = null; }
+    // Restore the basemap's own label of a highlighted search hit.
+    map.clearPlaceHighlight();
+  }
+
+  /** `place` is {name, kind, lat, lon, address|null, cityLevel}; a missing
+   *  address is reverse-geocoded and filled in while the card is open. */
+  function showPlaceCard(place) {
+    currentPlace = place;
+    // One primary surface at a time: the card replaces the results dropdown
+    // AND the route panel (trip state stays; "Route" brings the panel back).
+    $('results').classList.remove('open');
+    $('route-panel').classList.remove('open');
+    $('pc-name').textContent = place.name;
+    $('pc-kind').textContent = place.kind || '';
+    $('pc-kind').style.display = place.kind ? '' : 'none';
+    // Coordinates always, subtle; the address line only once one is known —
+    // until then the coordinates line IS the fallback address.
+    $('pc-coords').textContent = place.lat.toFixed(5) + ', ' + place.lon.toFixed(5);
+    const addressText = composeAddress(place.address, place.cityLevel);
+    $('pc-address').textContent = addressText;
+    $('pc-address').style.display = addressText ? '' : 'none';
+    const blocked = mode === 'offline';
+    $('pc-route').disabled = blocked;
+    $('pc-route-from').disabled = blocked;
+    $('place-card').classList.add('open');
+    if (place.address || blocked) return;
+    post('/api/v1/maps/reverse-geocode', { lat: place.lat, lon: place.lon, lang })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null)
+      .then((named) => {
+        // The card may have moved on to another place while this was in
+        // flight — currentPlace is the honest check, not a stale flag.
+        if (!named || currentPlace !== place) return;
+        place.address = named.address || null;
+        const text = composeAddress(place.address, place.cityLevel);
+        if (text) {
+          $('pc-address').textContent = text;
+          $('pc-address').style.display = '';
+        }
+      });
+  }
+
+  $('pc-close').addEventListener('click', closePlaceCard);
+  /** Both card actions feed the same trip model as the right-click menu. */
+  function placeToStop() {
+    return { label: currentPlace.name, lat: currentPlace.lat, lon: currentPlace.lon };
+  }
+  $('pc-route').addEventListener('click', () => {
+    if (!currentPlace) return;
+    const stop = placeToStop();
+    closePlaceCard();
+    addStop('end', stop);
+  });
+  $('pc-route-from').addEventListener('click', () => {
+    if (!currentPlace) return;
+    const stop = placeToStop();
+    closePlaceCard();
+    addStop('start', stop);
+  });
+
+  // -- left click: POIs answer, open ground stays quiet -----------------
+  // A plain click only opens the detail card when it lands on something the
+  // map itself names (a POI icon). Clicking open ground dismisses whatever
+  // is open and nothing more — dropping a pin on every stray click made the
+  // map feel booby-trapped. Arbitrary coordinates are the right-click
+  // menu's job.
+  map.map.on('click', (event) => {
+    closeMenu();
+    // A click that landed on the route itself already has its own handler
+    // (promoteAlternate) — a card on top of that would just be noise.
+    const hits = map.map.queryRenderedFeatures(event.point);
+    if (hits.some((f) => (f.layer.id || '').startsWith('route-'))) return;
+    // Only something the map names answers a plain click. Open ground just
+    // dismisses whatever is open. The POI test uses a small box, not the
+    // exact pixel — icons are ~16 px and demanding a dead-centre hit made
+    // them feel unclickable.
+    const pad = 8;
+    const nearby = map.map.queryRenderedFeatures([
+      [event.point.x - pad, event.point.y - pad],
+      [event.point.x + pad, event.point.y + pad],
+    ]);
+    const poi = nearby.find((f) => f.layer && f.layer['source-layer'] === 'pois'
+      && f.properties && (f.properties['name:' + lang] || f.properties.name));
+    if (!poi) { closePlaceCard(); return; }
+    closePlaceCard();
+    const pinEl = document.createElement('div');
+    pinEl.className = 'am-map-search-pin';
+    pinEl.innerHTML = '<i></i>';
+    clickPin = new maplibregl.Marker({ element: pinEl, anchor: 'bottom' })
+      .setLngLat([event.lngLat.lng, event.lngLat.lat]).addTo(map.map);
+    showPlaceCard({
+      name: poi.properties['name:' + lang] || poi.properties.name,
+      kind: poi.properties.kind || poi.properties.class || '',
+      lat: event.lngLat.lat, lon: event.lngLat.lng,
+      address: null, cityLevel: false,
+    });
+  });
+
+  // -- URL state --------------------------------------------------------
+  // The address bar always holds the whole view, in Google Maps' own syntax:
+  //
+  //     #@49.00690,8.40365,13.5z&view=map-light&lang=de
+  //
+  // so a reload lands where you were, a pasted link reproduces it exactly,
+  // and a Google Maps URL can be dropped in as-is — the `@lat,lng,Nz` core
+  // parses identically. Bearing and pitch follow Google too (`,90h,45t`) and
+  // are written only when they are not zero. The runtime mode (offline /
+  // mixed / online) is deliberately *not* in here: it is server-side state,
+  // and a shared link must not change what a visitor's browser is allowed
+  // to do.
+  const VIEW_ALIAS = {
+    hybrid: 'hybrid', satellite: 'satellite', satellit: 'satellite',
+    map: 'map-light', karte: 'map-light', 'map-light': 'map-light',
+    dark: 'map-dark', dunkel: 'map-dark', 'map-dark': 'map-dark',
+  };
+  const NUM = '(-?\\d+(?:\\.\\d+)?)';
+
+  function readUrlState(text) {
+    const src = decodeURIComponent(text || location.hash || location.pathname || '');
+    const state = {};
+    const at = src.match(new RegExp('@' + NUM + ',' + NUM));
+    if (at) { state.lat = +at[1]; state.lon = +at[2]; }
+    const pick = (suffix) => {
+      const m = src.match(new RegExp(',' + NUM + suffix + '\\b'));
+      return m ? +m[1] : undefined;
+    };
+    state.zoom = pick('z'); state.bearing = pick('h'); state.pitch = pick('t');
+    const opt = (name) => (src.match(new RegExp('[&?/]' + name + '=([\\w-]+)')) || [])[1];
+    const view = opt('view');
+    if (view) state.view = VIEW_ALIAS[view.toLowerCase()];
+    const code = opt('lang');
+    if (code) state.lang = code;
+    return state;
+  }
+
+  let urlTimer = null;
+  let currentView = map.payload.default_view || 'hybrid';
+  function writeUrlState() {
+    clearTimeout(urlTimer);
+    // Nav mode drives the camera every frame — writing each pose into the
+    // hash would spam replaceState for nothing. Suspended while it runs;
+    // the exit handler writes the final state once.
+    if (document.body.classList.contains('nav-mode')) return;
+    urlTimer = setTimeout(() => {
+      const c = map.map.getCenter();
+      const trim = (v, digits) => String(+v.toFixed(digits));
+      let at = '@' + trim(c.lat, 5) + ',' + trim(c.lng, 5) + ',' + trim(map.map.getZoom(), 2) + 'z';
+      const bearing = map.map.getBearing(), pitch = map.map.getPitch();
+      if (Math.abs(bearing) > 0.01) at += ',' + trim(bearing, 1) + 'h';
+      if (Math.abs(pitch) > 0.01) at += ',' + trim(pitch, 1) + 't';
+      history.replaceState(null, '', '#' + at + '&view=' + currentView + '&lang=' + lang);
+    }, 250);
+  }
+
+  // -- layers control, theme & zoom --------------------------------------
+  // The view choice (Hybrid / Satellit / Karte) says WHAT is on the map;
+  // the theme (hell / dunkel / automatisch) says how Karte is inked. The
+  // effective view stays 'map-light'/'map-dark' internally AND in the URL,
+  // so a shared link reproduces exactly what was on screen — and existing
+  // view=map-dark links keep working (Karte + theme dark).
+  const viewChoiceOf = (view) =>
+    (view === 'map-light' || view === 'map-dark' ? 'map' : view);
+  const effectiveView = (choice) =>
+    (choice === 'map' ? (effectiveDark() ? 'map-dark' : 'map-light') : choice);
+
+  // The layers picker's tiles. Future entries (Verkehr, Gelände, ÖPNV …)
+  // are one more object here — the grid renders itself from this array.
+  // `thumb` names a tiny STATIC preview under /assets, never a live tile.
+  const LAYER_THUMBS = { map: '/assets/layers-map.png', sat: '/assets/layers-sat.png' };
+  const LAYER_TILES = [
+    { choice: 'hybrid', label: 'Hybrid', thumb: 'sat' },
+    { choice: 'satellite', label: 'Satellit', thumb: 'sat' },
+    { choice: 'map', label: 'Karte', thumb: 'map' },
+  ];
+
+  // Built ONCE, then only the active class moves: a click must not replace
+  // the clicked node mid-event, or the document-level outside-click closer
+  // sees a detached target and shuts the picker on every selection.
+  function renderLayerTiles() {
+    const grid = $('layers-grid');
+    grid.innerHTML = '';
+    for (const tile of LAYER_TILES) {
+      const btn = document.createElement('button');
+      btn.className = 'lp-tile';
+      btn.dataset.choice = tile.choice;
+      btn.title = tile.label;
+      const thumb = document.createElement('span');
+      thumb.className = 'lp-thumb';
+      thumb.style.backgroundImage = 'url(' + LAYER_THUMBS[tile.thumb] + ')';
+      btn.appendChild(thumb);
+      btn.appendChild(document.createTextNode(tile.label));
+      btn.addEventListener('click', () => setView(effectiveView(tile.choice)));
+      grid.appendChild(btn);
+    }
+    syncLayerTiles();
+  }
+
+  function syncLayerTiles() {
+    const current = viewChoiceOf(currentView);
+    document.querySelectorAll('#layers-grid .lp-tile').forEach((btn) =>
+      btn.classList.toggle('active', btn.dataset.choice === current));
+  }
+
+  /** Google's convention for the big tile: it previews the view you would
+   *  switch TO — imagery while the vector map is up, the vector map while
+   *  Hybrid/Satellit is up. */
+  function updateLayersButton() {
+    const next = viewChoiceOf(currentView) === 'map' ? 'sat' : 'map';
+    $('layers-btn').style.setProperty('--layers-thumb', 'url(' + LAYER_THUMBS[next] + ')');
+  }
+
+  /** Mirror the nav palette (road-styles.js NAV — one token system next to
+   *  CARTO, navy/amber) into CSS custom properties. The nav stylesheet only
+   *  ever reads var(--nav-*); the dark map view swaps the whole set. */
+  const NAV_CSS_KEYS = {
+    banner: '--nav-banner', bannerEdge: '--nav-banner-edge',
+    bannerBar: '--nav-banner-bar', accent: '--nav-accent',
+    ink: '--nav-ink', inkSoft: '--nav-ink-soft',
+    surface: '--nav-surface', surfaceInk: '--nav-surface-ink',
+    surfaceMuted: '--nav-surface-muted', surfaceLine: '--nav-surface-line',
+    chipBg: '--nav-chip-bg', chipInk: '--nav-chip-ink',
+    time: '--nav-time', danger: '--nav-danger', dangerInk: '--nav-danger-ink',
+    exitInk: '--nav-exit-ink',
+    marker: '--nav-marker', markerRing: '--nav-marker-ring',
+    start: '--nav-start', startHover: '--nav-start-hover',
+    panelAccent: '--nav-panel-accent', traveled: '--nav-traveled',
+  };
+  function applyNavTheme(dark) {
+    const tokens = agenticRoadStyles.NAV[dark ? 'dark' : 'light'];
+    for (const key in NAV_CSS_KEYS) {
+      document.documentElement.style.setProperty(NAV_CSS_KEYS[key], tokens[key]);
+    }
+  }
+  applyNavTheme(false);   // sane light defaults before the first setView
+
+  // Aerial-quality auto-fallback memory (wired further down, after the
+  // moveend plumbing): while the display was auto-switched to Karte over
+  // an imagery-free region, this remembers the view the USER chose.
+  // Declared here because setView must clear it on every MANUAL switch —
+  // the user's own choice always beats the automatic memory.
+  let aerialChosenView = null;
+  let aerialAutoView = false;    // true only while the fallback drives setView
+
+  function setView(view) {
+    if (!aerialAutoView) aerialChosenView = null;   // manual choice wins
+    currentView = view;
+    map.setView(view);
+    applyNavTheme(view === 'map-dark');
+    updateLayersButton();
+    syncLayerTiles();
+    writeUrlState();
+  }
+  renderLayerTiles();
+  $('layers-btn').addEventListener('click', (event) => {
+    event.stopPropagation();
+    syncLayerTiles();
+    $('layers-picker').classList.toggle('open');
+  });
+  document.addEventListener('click', (event) => {
+    if (!$('layers-control').contains(event.target)) {
+      $('layers-picker').classList.remove('open');
+    }
+  });
+
+  function setTheme(next) {
+    theme = next;
+    localStorage.setItem(THEME_KEY, theme);
+    updateThemeButton();
+    // Hybrid/Satellit are imagery — unaffected; the choice is remembered
+    // and applies the next time Karte is on stage.
+    if (viewChoiceOf(currentView) === 'map') setView(effectiveView('map'));
+  }
+  $('btn-theme').addEventListener('click', () =>
+    setTheme(THEME_CYCLE[(THEME_CYCLE.indexOf(theme) + 1) % THEME_CYCLE.length]));
+  // theme=auto follows the OS live, not just at load time.
+  const onSchemeChange = () => { if (theme === 'auto') setTheme('auto'); };
+  if (darkScheme.addEventListener) darkScheme.addEventListener('change', onSchemeChange);
+  else if (darkScheme.addListener) darkScheme.addListener(onSchemeChange);
+
+  /** A pasted map-light/map-dark URL fixes the theme so 'Karte' resolves to
+   *  exactly the look the link's author saw. */
+  function adoptThemeFromView(view) {
+    const wantsDark = view === 'map-dark' ? true : view === 'map-light' ? false : null;
+    if (wantsDark === null || effectiveDark() === wantsDark) return;
+    theme = wantsDark ? 'dark' : 'bright';
+    localStorage.setItem(THEME_KEY, theme);
+    updateThemeButton();
+  }
+
+  const startState = readUrlState();
+  adoptThemeFromView(startState.view);
+  setView(startState.view
+    || effectiveView(viewChoiceOf(map.payload.default_view || 'hybrid')));
+
+  const langSelect = $('lang');
+  for (const code of (map.payload.languages || ['de', 'en'])) {
+    const option = document.createElement('option');
+    option.value = code;
+    option.textContent = LANG_NAMES[code] || code.toUpperCase();
+    langSelect.appendChild(option);
+  }
+  if (startState.lang && LANG_NAMES[startState.lang]) {
+    lang = startState.lang;
+    map.setLanguage(lang);
+  }
+  langSelect.value = lang;
+  langSelect.addEventListener('change', () => {
+    lang = langSelect.value;
+    map.setLanguage(lang);   // relabels cities, streets and countries at once
+    status('Beschriftung: ' + (LANG_NAMES[lang] || lang));
+    writeUrlState();
+  });
+
+  // Restore the camera last, so the view switch and relabelling are already
+  // in place and the move fires exactly one URL write.
+  if (startState.lat !== undefined) {
+    map.map.jumpTo({
+      center: [startState.lon, startState.lat],
+      zoom: startState.zoom !== undefined ? startState.zoom : map.map.getZoom(),
+      bearing: startState.bearing || 0,
+      pitch: startState.pitch || 0,
+    });
+  }
+  writeUrlState();
+
+  // Editing the address bar or using the back button is a navigation request,
+  // not an echo of our own writes — those go through replaceState, which does
+  // not fire this.
+  window.addEventListener('hashchange', () => {
+    const s = readUrlState();
+    if (s.view && s.view !== currentView) { adoptThemeFromView(s.view); setView(s.view); }
+    if (s.lang && s.lang !== lang && LANG_NAMES[s.lang]) {
+      lang = s.lang; langSelect.value = lang; map.setLanguage(lang);
+    }
+    if (s.lat !== undefined) {
+      map.map.jumpTo({
+        center: [s.lon, s.lat],
+        zoom: s.zoom !== undefined ? s.zoom : map.map.getZoom(),
+        bearing: s.bearing || 0, pitch: s.pitch || 0,
+      });
+    }
+  });
+
+  // Click steps one level; holding the button past HOLD_DELAY_MS zooms
+  // continuously until release, like the keyboard repeat on a text field.
+  const HOLD_DELAY_MS = 400;     // how long a press must last to become a hold
+  const HOLD_STEP_MS = 110;      // cadence while held
+  const HOLD_STEP = 0.35;        // zoom levels per tick
+
+  function holdToZoom(button, direction) {
+    let delayTimer = null, repeatTimer = null, held = false, pressed = false;
+    const start = () => {
+      pressed = true; held = false;
+      delayTimer = setTimeout(() => {
+        held = true;
+        repeatTimer = setInterval(() => {
+          map.map.easeTo({ zoom: map.map.getZoom() + direction * HOLD_STEP, duration: HOLD_STEP_MS });
+        }, HOLD_STEP_MS);
+      }, HOLD_DELAY_MS);
+    };
+    const stop = () => {
+      // Only a real press can zoom: pointerleave fires when the cursor merely
+      // passes over the button, and without this guard hovering zoomed the map.
+      if (!pressed) return;
+      pressed = false;
+      clearTimeout(delayTimer); clearInterval(repeatTimer);
+      if (!held) map.map.easeTo({ zoom: map.map.getZoom() + direction, duration: 300 });
+      held = false;
+    };
+    button.addEventListener('pointerdown', (ev) => { ev.preventDefault(); start(); });
+    for (const event of ['pointerup', 'pointerleave', 'pointercancel']) {
+      button.addEventListener(event, stop);
+    }
+  }
+  holdToZoom($('zoom-in'), +1);
+  holdToZoom($('zoom-out'), -1);
+
+  // -- 3D tilt + compass ------------------------------------------------
+  // Two controls, two orthogonal axes — neither ever touches the other's:
+  //   · 3D/2D button: pitch only (0 <-> 55°), bearing untouched.
+  //   · Compass: north-lock toggle. Engaging it animates the bearing to 0
+  //     and KEEPS it there — every further rotate gesture snaps back north
+  //     until the lock is toggled off. Pitch untouched (the old behaviour
+  //     dropped back to 2D on every compass click, which nobody asked for).
+  // Mercator + pitch — no earth curvature at these zooms; the globe keeps
+  // planet scale.
+  const TILT_PITCH = 55;
+  let northLocked = false;
+  function syncTiltControl() {
+    const bearing = map.map.getBearing();
+    const pitched = map.map.getPitch() > 0.5;
+    $('compass-needle').style.transform = 'rotate(' + (-bearing).toFixed(1) + 'deg)';
+    $('btn-3d').classList.toggle('active', pitched);
+    $('btn-3d').textContent = pitched ? '2D' : '3D';
+    $('btn-3d').title = pitched ? 'Flache Ansicht (nur Neigung)' : '3D-Ansicht (nur Neigung)';
+  }
+  function syncCompassButton() {
+    $('btn-compass').classList.toggle('active', northLocked);
+    $('btn-compass').title = northLocked
+      ? 'Norden fixiert — klicken zum Freigeben'
+      : 'Nach Norden ausrichten und fixieren';
+  }
+  $('btn-3d').addEventListener('click', () => {
+    const flat = map.map.getPitch() <= 0.5;
+    map.map.easeTo({ pitch: flat ? TILT_PITCH : 0, duration: 800 });
+  });
+  $('btn-compass').addEventListener('click', () => {
+    northLocked = !northLocked;
+    syncCompassButton();
+    if (northLocked) map.map.easeTo({ bearing: 0, duration: 600 });
+  });
+  // The lock enforces itself when a USER gesture rotated the map (the
+  // originalEvent test — programmatic camera moves, above all nav mode's
+  // heading-up follow camera, must never be fought). rotateend rather than
+  // rotate: snapping mid-gesture stutters against the pointer.
+  map.map.on('rotateend', (event) => {
+    if (!northLocked || !event.originalEvent) return;
+    if (document.body.classList.contains('nav-mode')) return;
+    if (Math.abs(map.map.getBearing()) > 0.1) {
+      map.map.easeTo({ bearing: 0, duration: 350 });
+    }
+  });
+  map.map.on('rotate', syncTiltControl);
+  map.map.on('pitch', syncTiltControl);
+  syncTiltControl();
+  syncCompassButton();
+
+  // -- navigation mode ("drive a route") --------------------------------
+  // All behaviour lives in nav.js; this is only the dependency injection:
+  // the current primary route, the units-aware formatters, and the same
+  // instruction wording/glyphs the steps list uses — the HUD may never
+  // disagree with the panel about what a maneuver is called.
+  const navigation = window.agenticMountNavigation({
+    map,
+    getRoute: () => currentRoute,
+    fmtDistance,
+    fmtDuration,
+    fmtSpeed: (ms) => (unitsSetting === 'mi'
+      ? Math.round(ms * 2.23694) + ' mph' : Math.round(ms * 3.6) + ' km/h'),
+    instructionText,
+    maneuverGlyph,
+    destinationLabel: () => {
+      const named = routableStops();
+      return (named[named.length - 1] || {}).label || 'Ziel';
+    },
+    onExit: () => {
+      // Back to the classic reading: flat, north-up, the whole route framed
+      // — and the suspended hash-writing resumes with one final state.
+      map.map.jumpTo({ pitch: 0, bearing: 0 });
+      if (currentRoute) {
+        const lons = currentRoute.geometry.map((p) => p.lon);
+        const lats = currentRoute.geometry.map((p) => p.lat);
+        map.map.fitBounds(
+          [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+          { padding: 90, duration: 900 });
+      }
+      writeUrlState();
+    },
+  });
+  window.agenticNav = navigation;   // the verify harness drives it directly
+  $('btn-nav-start').addEventListener('click', () => {
+    if (!navigation.start()) status('Erst eine Route berechnen');
+  });
+  $('dev-nav').addEventListener('click', () => {
+    if (!currentRoute) { status('Erst eine Route berechnen'); return; }
+    setDevMode(false);
+    navigation.start();
+  });
+
+  // -- in-nav map-type toggle (bottom bar): Hybrid <-> Karte -------------
+  // Runs through the normal setView path; nav.js's style-restored listener
+  // re-applies the route emphasis and the traveled layer after the swap.
+  $('nav-layers').addEventListener('click', () => {
+    setView(viewChoiceOf(currentView) === 'map' ? 'hybrid' : effectiveView('map'));
+  });
+
+  // -- attribution in navigation mode: ⓘ badge, credits one tap away -----
+  // The full line is read from the standing (CSS-hidden) MapLibre control,
+  // so the badge always shows exactly what the live view would show —
+  // per-zoom imagery credits included. Auto-collapses; outside click too.
+  const attribWrap = $('nav-attrib-wrap');
+  let attribTimer = null;
+  function collapseNavAttrib() {
+    attribWrap.classList.remove('open');
+    clearTimeout(attribTimer);
+  }
+  $('nav-attrib').addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (attribWrap.classList.contains('open')) { collapseNavAttrib(); return; }
+    const standing = document.querySelector('.maplibregl-ctrl-attrib');
+    $('nav-attrib-line').textContent =
+      ((standing && standing.textContent) || '').trim()
+      || map.payload.attribution || '';
+    attribWrap.classList.add('open');
+    clearTimeout(attribTimer);
+    attribTimer = setTimeout(collapseNavAttrib, 12000);
+  });
+  document.addEventListener('click', (event) => {
+    if (!attribWrap.contains(event.target)) collapseNavAttrib();
+  });
+
+  // -- in-nav route options (the branching-arrows button) ----------------
+  // Trip changes mid-drive: remove a via, add a stop (shared ranked
+  // autocomplete), switch alternates. Everything runs through the normal
+  // auto-route flow; drawRoute()/route-promoted hand the recomputed route
+  // to navigation.updateRoute(), which re-snaps the marker in place.
+  const nroPanel = $('nav-route-options');
+  function renderNavRouteOptions() {
+    const stopsBox = $('nro-stops');
+    stopsBox.innerHTML = '';
+    tripStops.forEach((stop, index) => {
+      if (stop.lat == null && !stop.label) return;
+      const row = document.createElement('div');
+      row.className = 'nro-stop';
+      const glyph = document.createElement('span');
+      glyph.className = 'stop-glyph';
+      glyph.innerHTML = stopGlyph(index);
+      const name = document.createElement('b');
+      name.textContent = stop.label
+        || (stop.lat.toFixed(4) + ', ' + stop.lon.toFixed(4));
+      row.appendChild(glyph);
+      row.appendChild(name);
+      if (index > 0 && index < tripStops.length - 1) {
+        const drop = document.createElement('button');
+        drop.textContent = '✕';
+        drop.title = 'Zwischenstopp entfernen';
+        drop.addEventListener('click', () => {
+          tripStops.splice(index, 1);
+          renderTripStops();
+          syncClearButton();
+          onTripChanged();
+          renderNavRouteOptions();
+        });
+        row.appendChild(drop);
+      }
+      stopsBox.appendChild(row);
+    });
+    const altBox = $('nro-alts');
+    altBox.innerHTML = '';
+    const r = currentRoute;
+    const hasAlts = !!(r && r.alternates && r.alternates.length);
+    $('nro-alts-head').style.display = hasAlts ? '' : 'none';
+    if (!hasAlts) return;
+    const rows = [{ r, primary: true },
+      ...r.alternates.map((alt, index) => ({ r: alt, index }))];
+    for (const { r: cand, primary, index } of rows) {
+      const others = rows.filter((o) => o.r !== cand).map((o) => o.r);
+      const row = document.createElement('div');
+      row.className = 'nro-alt' + (primary ? ' active' : '');
+      const label = placeViaLabel(cand, others) || routeViaLabel(cand, others);
+      row.innerHTML = '<span>' + (label ? 'über ' + escText(label) : 'Route')
+        + '</span><b>' + fmtDuration(cand.duration_min) + '</b>';
+      if (!primary) {
+        row.title = 'Als Route wählen';
+        row.addEventListener('click', () => {
+          map.promoteAlternate(currentRoute, index);
+          renderNavRouteOptions();
+        });
+      }
+      altBox.appendChild(row);
+    }
+  }
+  $('nav-options').addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (nroPanel.classList.contains('open')) {
+      nroPanel.classList.remove('open');
+      return;
+    }
+    renderNavRouteOptions();
+    nroPanel.classList.add('open');
+  });
+  document.addEventListener('click', (event) => {
+    if (nroPanel.classList.contains('open') && !nroPanel.contains(event.target)) {
+      nroPanel.classList.remove('open');
+    }
+  });
+  const nroInput = $('nro-add-input');
+  let nroTimer = null;
+  let nroSeq = 0;
+  nroInput.addEventListener('input', () => {
+    const query = nroInput.value.trim();
+    clearTimeout(nroTimer);
+    const seq = ++nroSeq;
+    const box = $('nro-suggest');
+    if (query.length < 2 || mode === 'offline') { box.innerHTML = ''; return; }
+    nroTimer = setTimeout(async () => {
+      const items = (await lookup(query)).filter((it) => it.place);
+      if (seq !== nroSeq) return;
+      box.innerHTML = '';
+      for (const item of items.slice(0, 5)) {
+        box.appendChild(buildResultRow(item, () => {
+          nroInput.value = '';
+          box.innerHTML = '';
+          // Mid-drive additions become via stops — the destination stays.
+          addStop('via', { label: item.title, lat: item.place.lat, lon: item.place.lon });
+          renderNavRouteOptions();
+        }));
+      }
+    }, 350);
+  });
+
+  // Panning into unprepared territory re-reads how deep the street data goes
+  // there — and mints more when the view asks for more than exists. This runs
+  // at every zoom, not just close up: the continental extract stops at z9, so
+  // even a z10 view over France would otherwise request tiles nobody has.
+  let moveTimer = null;
+  map.map.on('moveend', () => {
+    writeUrlState();
+    clearTimeout(moveTimer);
+    moveTimer = setTimeout(() => {
+      const c = map.map.getCenter();
+      ensureVectors(c.lat, c.lng, null, map.map.getZoom());
+    }, 500);
+  });
+
+  // -- aerial-quality auto-fallback (the New-York case) -------------------
+  // Hybrid at z12 over a region with no regional/fine imagery shows nothing
+  // but an upscaled Blue-Marble smear. On every settled move in an imagery
+  // view, ask the server how native the imagery really is here (pure bbox
+  // math against the band-coverage config — GET /aerial/quality, no tiles):
+  // ≥ AERIAL_GAP_SWITCH zooms past native switches the DISPLAY to the map
+  // view with a toast, remembering the user's choice; once a later move
+  // reports ≤ AERIAL_GAP_RESTORE the chosen view comes back on its own. The
+  // two thresholds are deliberate hysteresis — panning along a coverage
+  // edge must not flap. A manual view pick while fallen back wins (setView
+  // clears the memory above).
+  const AERIAL_GAP_SWITCH = 3;
+  const AERIAL_GAP_RESTORE = 1;
+  const aerialSrcMatch = /\/aerial\/([^/]+)\//.exec(map.payload.aerial_url_template || '');
+  const aerialQualitySrc = aerialSrcMatch ? aerialSrcMatch[1] : null;
+  let aerialQualitySeq = 0;
+  let aerialQualityTimer = null;
+
+  async function checkAerialQuality() {
+    if (!aerialQualitySrc || map.payload.offline) return;
+    const onImagery = currentView === 'hybrid' || currentView === 'satellite';
+    if (!onImagery && aerialChosenView === null) return;
+    const zoom = Math.round(map.map.getZoom());
+    // Below this zoom the world band alone keeps the gap under the switch
+    // threshold — not worth a request unless a restore is pending.
+    if (aerialChosenView === null
+        && zoom < (map.payload.world_max_zoom || 8) + AERIAL_GAP_SWITCH) return;
+    const b = map.map.getBounds();
+    const west = Math.max(-180, b.getWest()), east = Math.min(180, b.getEast());
+    const south = Math.max(-85, b.getSouth()), north = Math.min(85, b.getNorth());
+    if (west >= east || south >= north) return;      // antimeridian wrap
+    const seq = ++aerialQualitySeq;
+    let quality;
+    try {
+      const res = await fetch('/api/v1/maps/aerial/quality?src='
+        + encodeURIComponent(aerialQualitySrc) + '&west=' + west + '&south=' + south
+        + '&east=' + east + '&north=' + north + '&zoom=' + zoom);
+      if (!res.ok) return;
+      quality = await res.json();
+    } catch (err) { return; }
+    if (seq !== aerialQualitySeq) return;            // a newer move superseded us
+    if (aerialChosenView === null && onImagery && quality.gap >= AERIAL_GAP_SWITCH) {
+      const chosen = currentView;
+      aerialAutoView = true;
+      setView(effectiveView('map'));
+      aerialAutoView = false;
+      aerialChosenView = chosen;
+      status('Keine Luftbilder in dieser Region — Kartenansicht');
+    } else if (aerialChosenView !== null && quality.gap <= AERIAL_GAP_RESTORE) {
+      const restore = aerialChosenView;
+      aerialAutoView = true;
+      setView(restore);
+      aerialAutoView = false;
+      aerialChosenView = null;
+      status('Luftbilder wieder verfügbar — ' + (restore === 'satellite' ? 'Satellit' : 'Hybrid'));
+    }
+  }
+  map.map.on('moveend', () => {
+    clearTimeout(aerialQualityTimer);
+    aerialQualityTimer = setTimeout(checkAerialQuality, 450);
+  });
+  checkAerialQuality();   // a shared NY-in-hybrid link falls back on load too
+
+  // ===================================================================
+  // Developer mode: demo scenarios and tooling, nothing on the landing page
+  // ===================================================================
+
+  // Three states, enforced on both sides (models/runtime_mode.py): the server
+  // refuses every gated endpoint per its own rules, and the client stops
+  // asking for what it already knows is refused. "offline" blocks search/
+  // routing entirely (the trip controls go quiet); "mixed" keeps those live
+  // but stops the client from asking to mint new local data (ensureVectors
+  // above); "online" allows everything.
+  let mode = 'online';
+  const MODE_LABEL = {
+    offline: 'Offline — nur lokale Daten. Suche, Routing und Live-Kacheln sind deaktiviert.',
+    mixed: 'Gemischt — Suche/Routing/Kacheln live, aber keine neuen Regionen werden geladen.',
+    online: 'Online — Authoring-Modus.',
+  };
+
+  function applyMode(newMode) {
+    mode = newMode;
+    document.querySelectorAll('#mode-switch button[data-mode]')
+      .forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+    $('dev-offline').textContent = 'Modus: ' + mode;
+    $('dev-offline').classList.toggle('active', mode !== 'online');
+    const searchBlocked = mode === 'offline';
+    $('q').disabled = searchBlocked;
+    $('q').placeholder = searchBlocked ? 'Suche im Offline-Modus deaktiviert' : 'Ort, Land oder Adresse suchen';
+    // Only full offline blocks geocoding and routing — mixed keeps both live.
+    for (const id of ['btn-add-stop', 'btn-swap', 'pc-route', 'pc-route-from']) {
+      $(id).disabled = searchBlocked;
+    }
+    for (const tab of document.querySelectorAll('#mode-tabs .mode-tab')) tab.disabled = searchBlocked;
+    for (const input of document.querySelectorAll('#stops-list input')) input.disabled = searchBlocked;
+    if (searchBlocked) {
+      $('route-panel').classList.remove('open');
+      $('results').classList.remove('open');
+    }
+  }
+
+  async function setMode(wanted) {
+    const res = await post('/api/v1/maps/mode', { mode: wanted });
+    const state = res.ok ? (await res.json()).mode : mode;
+    applyMode(state);
+    status((MODE_LABEL[state] || state) + ' …', true);
+    // The tile source template is baked into the style at load time: online/
+    // mixed point at the live proxy, offline at the sealed bundles. Switching
+    // modes therefore has to rebuild the payload, otherwise the map keeps
+    // asking a proxy that now refuses it.
+    setTimeout(() => location.reload(), 400);
+  }
+
+  fetch('/api/v1/maps/mode').then((r) => r.json()).then((m) => applyMode(m.mode)).catch(() => {});
+
+  document.querySelectorAll('#mode-switch button[data-mode]')
+    .forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+  // The gear opens the compact settings card holding the Netzmodus control;
+  // ✕ or any click outside closes it again.
+  $('settings-toggle').addEventListener('click', (event) => {
+    event.stopPropagation();
+    $('settings-menu').classList.toggle('open');
+  });
+  $('settings-close').addEventListener('click', () =>
+    $('settings-menu').classList.remove('open'));
+  document.addEventListener('click', (event) => {
+    if (!document.getElementById('settings').contains(event.target)) {
+      $('settings-menu').classList.remove('open');
+    }
+  });
+
+  // Developer mode: the "</>" button lower right toggles the structured
+  // panel; the choice survives reloads (localStorage) so a developer keeps
+  // their workbench across sessions.
+  const DEVMODE_KEY = 'am-maps-devmode';
+  function setDevMode(open) {
+    $('dev').classList.toggle('open', open);
+    $('btn-dev').classList.toggle('active', open);
+    // body.dev-on gates the developer-only chrome that lives OUTSIDE the
+    // panel — today the nav-mode simulation card: flipping dev mode while
+    // navigating shows/hides it immediately (the panel itself stays hidden
+    // in nav mode).
+    document.body.classList.toggle('dev-on', open);
+    localStorage.setItem(DEVMODE_KEY, open ? '1' : '0');
+    if (open) refreshDebugInfo();
+  }
+  $('btn-dev').addEventListener('click', () =>
+    setDevMode(!$('dev').classList.contains('open')));
+  $('dev-close').addEventListener('click', () => setDevMode(false));
+  if (localStorage.getItem(DEVMODE_KEY) === '1') setDevMode(true);
+
+  // Debug section: the state someone reporting a bug actually needs —
+  // runtime mode, view/language, what spec is loaded, and whether the
+  // remote debug bridge is switched on server-side.
+  async function refreshDebugInfo() {
+    const box = $('dev-debug-info');
+    if (!box) return;
+    const bridge = await fetch('/api/v1/maps/debug/enabled')
+      .then((r) => (r.ok ? r.json() : { enabled: false }))
+      .catch(() => ({ enabled: false }));
+    const spec = scenario || map.spec || { id: '—', locations: [], routes: [] };
+    box.textContent =
+      'Netzmodus: ' + mode
+      + '\nAnsicht: ' + currentView + ' · Sprache: ' + lang
+      + '\nSpec: ' + spec.id + ' · ' + (spec.locations || []).length
+      + ' Stopps · ' + (spec.routes || []).length + ' Routen'
+      + '\nDebug-Bridge: ' + (bridge.enabled ? 'aktiv' : 'aus');
+  }
+  $('dev-debug-refresh').addEventListener('click', refreshDebugInfo);
+
+  // Overlays section: the gallery is its own page (it swaps whole styles
+  // and datasets), so the panel links rather than embeds.
+  $('dev-overlays').addEventListener('click', () => window.open('/overlays.html', '_blank'));
+
+  let scenario = null;   // the loaded demo scenario spec, or null in map-app mode
+
+  function renderStops() {
+    const bar = $('stops'), list = $('dev-stops');
+    bar.innerHTML = ''; list.innerHTML = '';
+    if (!scenario) { bar.classList.remove('open'); return; }
+    const jump = (index, label) => {
+      map.goTo(index);
+      document.querySelectorAll('#stops button').forEach((b, i) => b.classList.toggle('active', i === index + 1));
+      status(label);
+    };
+    const overview = document.createElement('button');
+    overview.textContent = 'Overview';
+    overview.addEventListener('click', () => jump(-1, 'Overview'));
+    bar.appendChild(overview);
+    scenario.locations.forEach((loc, index) => {
+      const chip = document.createElement('button');
+      chip.textContent = loc.name;
+      chip.addEventListener('click', () => jump(index, loc.name));
+      bar.appendChild(chip);
+      const devChip = chip.cloneNode(true);
+      devChip.addEventListener('click', () => jump(index, loc.name));
+      list.appendChild(devChip);
+    });
+    bar.classList.add('open');
+  }
+
+  $('dev-load-scenario').addEventListener('click', async () => {
+    const payload = await (await fetch('/api/demo-spec?scenario=1')).json();
+    scenario = payload.spec;
+    map.loadSpec(scenario);
+    renderStops();
+    $('times').innerHTML = '<h3>Fahrzeiten</h3>'
+      + '<div class="row"><span>✈ Flughafen Stuttgart</span><b>24 min</b></div>'
+      + '<div class="row"><span>🚗 A8 nach München</span><b>2 h 25 min</b></div>'
+      + '<div class="row"><span>🚆 Metzingen Bahnhof</span><b>4 min</b></div>';
+    $('times').classList.add('open');
+    map.goTo(-1, { instant: true });
+    status('Szenario geladen: ' + scenario.locations.length + ' Stopps');
+  });
+
+  $('dev-unload-scenario').addEventListener('click', () => {
+    scenario = null;
+    map.loadSpec({ id: 'map-app', source_id: 'de-dop', locations: [], routes: [] });
+    renderStops();
+    $('times').classList.remove('open');
+    status('Karte geleert');
+  });
+
+  const stopAt = (id) => scenario && scenario.locations.find((l) => l.id === id);
+
+  async function animateRoute(fromId, toId, label) {
+    const a = stopAt(fromId), b = stopAt(toId);
+    if (!a || !b) { status('Erst „Szenario laden“'); return; }
+    status('Route wird berechnet …', true);
+    const res = await post('/api/v1/maps/route', {
+      route_id: 'dev-' + fromId + '-' + toId, mode: 'car',
+      start: a.camera.center, end: b.camera.center,
+      from_location: a.name, to_location: b.name,
+    });
+    if (!res.ok) { status('Routing nicht verfügbar (offline?)'); return; }
+    const route = await res.json();
+    route.animate_ms = 3200;          // the growing line the scenario uses
+    map.clearRoutes();
+    map.addRoute(route);
+    const lons = route.geometry.map((p) => p.lon), lats = route.geometry.map((p) => p.lat);
+    map.map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+      { padding: 100, duration: 1200 });
+    status(label + ': ' + route.duration_min.toFixed(0) + ' min, ' + route.distance_km.toFixed(0) + ' km');
+  }
+
+  $('dev-route-anim').addEventListener('click', () => animateRoute('hq', 'airport', 'HQ → Flughafen'));
+  $('dev-route-long').addEventListener('click', () => animateRoute('stuttgart', 'munich', 'Stuttgart → München'));
+
+  $('dev-ping').addEventListener('click', () => {
+    const c = map.map.getCenter();
+    map.pingAt([c.lng, c.lat], 'Hier', {});
+    status('Sonar-Ping gesetzt');
+  });
+  $('dev-radius').addEventListener('click', () => {
+    const c = map.map.getCenter();
+    map.addHighlight({ at: { lat: c.lat, lon: c.lng }, kind: 'radius', radius_m: 400,
+      label: '5 Min zu Fuß', color: '#7cc4ff', opacity: 0.18 });
+    status('400-m-Radius eingezeichnet');
+  });
+  $('dev-polygon').addEventListener('click', () => {
+    const c = map.map.getCenter(), d = 0.004;
+    map.addHighlight({ at: { lat: c.lat, lon: c.lng }, kind: 'polygon', label: 'Areal',
+      color: '#f5d76e', opacity: 0.2,
+      polygon: [
+        { lat: c.lat + d, lon: c.lng - d * 1.6 }, { lat: c.lat + d, lon: c.lng + d * 1.6 },
+        { lat: c.lat - d, lon: c.lng + d * 1.6 }, { lat: c.lat - d, lon: c.lng - d * 1.6 },
+      ] });
+    status('Fläche markiert');
+  });
+  $('dev-transit').addEventListener('click', () => {
+    const count = map.pingFeatures(['station', 'bus_stop', 'tram_stop', 'ferry_terminal'], { limit: 12, ttl_ms: 9000 });
+    status(count ? count + ' ÖPNV-Punkte gepingt' : 'Keine ÖPNV-Daten in diesem Ausschnitt');
+  });
+
+  $('dev-matrix').addEventListener('click', async () => {
+    if (!scenario) { status('Erst „Szenario laden“'); return; }
+    status('Erreichbarkeit wird berechnet …', true);
+    const points = scenario.locations.map((l) => l.camera.center);
+    const res = await post('/api/v1/maps/matrix', { points, mode: 'car' });
+    if (!res.ok) { status('Matrix nicht verfügbar (offline?)'); return; }
+    const durations = (await res.json()).durations_min;
+    $('times').innerHTML = '<h3>Erreichbarkeit ab ' + scenario.locations[0].name + '</h3>'
+      + scenario.locations.slice(1).map((loc, i) => {
+          const min = durations[0][i + 1];
+          const label = min >= 60 ? Math.floor(min / 60) + ' h ' + Math.round(min % 60) + ' min' : Math.round(min) + ' min';
+          return '<div class="row"><span>' + loc.name + '</span><b>' + label + '</b></div>';
+        }).join('');
+    $('times').classList.add('open');
+    status('Erreichbarkeitsmatrix aktualisiert');
+  });
+
+  // -- offline pipeline -------------------------------------------------
+  let recordArmed = false;
+  $('dev-record').addEventListener('click', async () => {
+    const btn = $('dev-record');
+    const spec = scenario || map.spec;
+    if (!spec.locations.length) { status('Nichts aufzunehmen — erst ein Szenario laden'); return; }
+    if (!recordArmed) {
+      status('Berechne Kachelbedarf …', true);
+      const res = await post('/api/v1/maps/plan', spec);
+      if (!res.ok) { status('Planung fehlgeschlagen'); return; }
+      const plan = await res.json();
+      recordArmed = true;
+      btn.classList.add('armed');
+      status('≈ ' + plan.tile_count + ' Kacheln / ' + plan.estimated_mb + ' MB — nochmal klicken', true);
+      return;
+    }
+    recordArmed = false;
+    btn.classList.remove('armed');
+    for (const loc of spec.locations) {
+      await ensureVectors(loc.camera.center.lat, loc.camera.center.lon, loc.name || loc.id,
+                          loc.camera.zoom || MINT_ZOOM);
+    }
+    status('Recording … Kacheln der gesamten Choreografie', true);
+    const res = await post('/api/v1/maps/harvest', spec);
+    if (!res.ok) { status('Recording fehlgeschlagen (offline?)'); return; }
+    const report = await res.json();
+    status('Aufgenommen: ' + report.fetched + ' neu, ' + report.skipped_existing + ' vorhanden, '
+      + report.failed + ' Fehler, ' + report.uncovered + ' ohne Bilddaten');
+  });
+
+  // Quick-cycle for pipeline testing — same three states, same server call
+  // (`setMode`) as the headline switcher above, so there is exactly one path
+  // that changes runtime mode rather than two that could disagree.
+  const MODE_CYCLE = ['offline', 'mixed', 'online'];
+  $('dev-offline').addEventListener('click', () => {
+    setMode(MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length]);
+  });
+
+  let cacheArmed = false;
+  $('dev-cache').addEventListener('click', async () => {
+    if (!cacheArmed) {
+      cacheArmed = true;
+      $('dev-cache').classList.add('armed');
+      status('Löscht alle Kacheln & Pakete — nochmal klicken', true);
+      return;
+    }
+    cacheArmed = false;
+    $('dev-cache').classList.remove('armed');
+    const res = await fetch('/api/v1/maps/cache', { method: 'DELETE' });
+    const report = await res.json();
+    status('Cache geleert: ' + report.removed.length + ' Dateien');
+  });
+
+  $('dev-package').addEventListener('click', async () => {
+    const spec = scenario || map.spec;
+    status('Paket wird gebaut …', true);
+    const res = await post('/api/v1/maps/package', spec);
+    if (!res.ok) { status('Paket fehlgeschlagen — vorher aufnehmen'); return; }
+    const manifest = await res.json();
+    status('Paket: ' + manifest.files.length + ' Dateien, '
+      + (manifest.total_bytes / 1048576).toFixed(0) + ' MB, '
+      + manifest.attributions.length + ' Quellen');
+  });
+
+  // -- browser sessions: panel wiring ----------------------------------
+  // The session spec itself mounted inline (top of this script); routes and
+  // decorations are already on the map. What remains is the PANEL state:
+  // the primary route's summary, alternates rows with via labels, and
+  // steps — the full normal UI, exactly as if the trip had been typed here.
+  // `adoptSessionSpec` doubles as the LIVE update path: a trip-bound
+  // session (open_map_view(trip_id=…)) re-applies each fresh payload IN
+  // PLACE on a revision bump — no reload, no second tab.
+  function adoptSessionSpec(spec, initial) {
+    const sessionRoutes = (spec && spec.routes) || [];
+    if (!sessionRoutes.length) return false;
+    const route = sessionRoutes[0];
+    const stops = route.stops || [];
+    const names = ((spec && spec.locations) || []).map((l) => l.name);
+    tripStops = stops.map((s, i) => ({
+      label: names.length === stops.length ? names[i]
+        : i === 0 ? (route.from_location || '')
+        : i === stops.length - 1 ? (route.to_location || '') : '',
+      lat: s.lat, lon: s.lon,
+    }));
+    if (tripStops.length < 2) return false;
+    selectedMode = MODES.indexOf(route.mode) !== -1 ? route.mode : selectedMode;
+    document.querySelectorAll('#mode-tabs .mode-tab').forEach((tab) =>
+      tab.classList.toggle('active', tab.dataset.mode === selectedMode));
+    $('route-panel').classList.add('open');
+    renderTripStops();
+    syncClearButton();
+    // Seed the signature and cache so the auto-route debounce does not
+    // immediately refire the routing the session already carries.
+    currentSig = tripSignature();
+    if (currentSig) {
+      routeCache.set(currentSig + '|' + selectedMode,
+        { route, promise: Promise.resolve(route) });
+      const node = tabTimeNode(selectedMode);
+      if (node) node.textContent = fmtTabTime(route.duration_min);
+    }
+    if (initial) {
+      // Drawing needs the style — the mount promise resolves before
+      // MapLibre's own load event, and addRoute mid-load throws.
+      const drawSession = () => drawRoute(route);
+      if (map.map.isStyleLoaded()) drawSession();
+      else map.map.once('load', drawSession);
+    } else {
+      // Live update: camera untouched unless the fresh route is ENTIRELY
+      // outside the viewport — then one gentle fit brings it on stage.
+      const b = map.map.getBounds();
+      const visible = (route.geometry || []).some((p) =>
+        p.lon >= b.getWest() && p.lon <= b.getEast()
+        && p.lat >= b.getSouth() && p.lat <= b.getNorth());
+      drawRoute(route, { noFit: true });
+      if (!visible && route.geometry && route.geometry.length) {
+        const lons = route.geometry.map((p) => p.lon);
+        const lats = route.geometry.map((p) => p.lat);
+        map.map.fitBounds([[Math.min(...lons), Math.min(...lats)],
+                           [Math.max(...lons), Math.max(...lats)]],
+          { padding: 90, duration: 1400 });
+      }
+    }
+    return true;
+  }
+
+  // Live session updates: open_map_view keeps ONE session per trip; every
+  // update_trip bumps its revision server-side. Poll the lightweight
+  // revision endpoint (only while this tab is visible) and re-fetch the
+  // full payload exactly on a bump — the smooth-insert flow, never a new
+  // tab, never a reload. Frozen (non-trip) sessions carry no
+  // session_revision and are never polled.
+  const SESSION_POLL_MS = 2500;
+  let sessionRevision = null;
+  let sessionPollTimer = null;
+  let sessionGone = false;
+
+  async function refreshSessionView() {
+    const res = await fetch('/api/v1/maps/sessions/' + encodeURIComponent(sessionToken));
+    if (!res.ok) return;
+    const payload = await res.json();
+    map.loadSpec(payload.spec || {});    // pins/decorations follow the fresh spec
+    adoptSessionSpec(payload.spec, false);
+    status('Route aktualisiert');        // after drawRoute — it clears #status
+  }
+
+  async function pollSessionRevision() {
+    sessionPollTimer = null;
+    try {
+      const res = await fetch('/api/v1/maps/sessions/'
+        + encodeURIComponent(sessionToken) + '/revision');
+      if (res.status === 404) { sessionGone = true; return; }   // expired for good
+      if (res.ok) {
+        const body = await res.json();
+        if (sessionRevision === null) sessionRevision = body.revision;
+        else if (body.revision !== sessionRevision) {
+          sessionRevision = body.revision;
+          await refreshSessionView();
+        }
+      }
+    } catch (err) { /* server briefly away — keep polling while visible */ }
+    scheduleSessionPoll();
+  }
+  function scheduleSessionPoll() {
+    if (sessionGone || document.hidden || sessionPollTimer) return;
+    sessionPollTimer = setTimeout(pollSessionRevision, SESSION_POLL_MS);
+  }
+
+  if (sessionToken && !sessionError) {
+    adoptSessionSpec(map.spec, true);
+    status('Sitzung geladen' + (map.spec.title ? ': ' + map.spec.title : ''));
+    if (typeof map.payload.session_revision === 'number') {
+      sessionRevision = map.payload.session_revision;
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { clearTimeout(sessionPollTimer); sessionPollTimer = null; }
+        else scheduleSessionPoll();
+      });
+      scheduleSessionPoll();
+    }
+  } else if (sessionToken) {
+    status('Sitzung nicht verfügbar: ' + sessionError, true);
+  }
+
+  // Deep links stay useful for QA: ?scenario=1 loads the scenario straight away.
+  if (new URLSearchParams(location.search).get('scenario')) $('dev-load-scenario').click();
+})();
+</script>
+</body>
+</html>

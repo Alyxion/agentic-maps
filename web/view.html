@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>agentic-maps — Ansicht</title>
+<link rel="stylesheet" href="./vendor/maplibre-gl.css">
+<link rel="stylesheet" href="./map.css">
+<style>
+  /* Miniature map view for embeddings (medallions, tiles): one fixed
+     camera, no controls, no state of its own. The host masks/frames;
+     this page delivers only the map. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #e9e7e2; }
+  #stage { position: absolute; inset: 0; }
+  #map { position: absolute; inset: 0; }
+  /* Miniature map: an attribution line does not fit in here without being
+     clipped by the round mask. It therefore moves to the host — the tile
+     carries only a number by which the host matches it up. */
+  .vw-tag { position: absolute; left: 8px; bottom: 8px; z-index: 70;
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    background: rgba(255,255,255,.92); color: #1b2430;
+    font: 600 11px/18px 'Helvetica Neue', Arial, sans-serif; text-align: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .vw-dot { width: 14px; height: 14px; border-radius: 50%; background: #d9a441;
+    border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.45); }
+  /* View cone: shows where the camera is currently looking. The tip sits
+     on the site, the cone opens in the viewing direction. */
+  .vw-cone { width: 0; height: 0; pointer-events: none; }
+  /* The wedge is drawn in screen coordinates: tip at the marker, rotation
+     from the projected angle. Only the two ANCHORS (drone, center) are
+     geographic — the angle between them belongs in screen space, otherwise
+     Mercator distorts it depending on latitude. */
+  .vw-wedge { position: absolute; left: 0; top: 0; width: 0; height: 0;
+    transform-origin: 0 0; pointer-events: none;
+    border-style: solid; border-color: transparent transparent
+      rgba(217,164,65,.26) transparent; }
+  /* Outer edge as a solid line in a stronger gold — the cone thereby gets
+     a clear boundary instead of just an area. */
+  .vw-wedge-edge { position: absolute; left: 0; top: 0; overflow: visible;
+    pointer-events: none; }
+  .vw-wedge-edge polygon { fill: none; stroke: #b8862b; stroke-width: 2;
+    stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+  .vw-cone b { position: absolute; left: -13px; top: -13px;
+    width: 26px; height: 26px; background: #f0c060;
+    -webkit-mask: var(--drone) center/contain no-repeat;
+    mask: var(--drone) center/contain no-repeat;
+    filter: drop-shadow(0 1px 4px rgba(0,0,0,.6)); }
+</style>
+</head>
+<body>
+<div id="stage"><div id="map" data-agentic-map></div></div>
+<script src="./vendor/maplibre-gl.js"></script>
+<script src="./vendor/basemaps.js"></script>
+<script src="./road-styles.js"></script>
+<script src="./palette-canvas.js"></script>
+<script src="./palette-theme.js"></script>
+<script src="./heatmaps.js"></script>
+<script>
+  document.getElementById('map').setAttribute('data-agentic-spec-url',
+    location.pathname.indexOf('/maps/') !== -1 ? './spec' : '/api/demo-spec');
+  // Set camera AND view kind BEFORE the mount: the map is constructed right
+  // at the target and in the right kind. Overview tiles (Germany) are never
+  // requested — and a pure map view never builds up the aerial layer that
+  // is otherwise visible for the blink of an eye.
+  (function () {
+    const q = new URLSearchParams(location.search);
+    const map = document.getElementById('map');
+    map.setAttribute('data-agentic-initial',
+      (q.get('lon') || '9.99') + ',' + (q.get('lat') || '53.55') + ',' +
+      (q.get('z') || '12'));
+    map.setAttribute('data-agentic-view', q.get('view') || 'map-light');
+  })();
+</script>
+<script src="./map.js"></script>
+<script>
+(async () => {
+  const q = new URLSearchParams(location.search);
+  // ?tag=N: miniature — a number instead of an attribution line; the host
+  // displays it.
+  const tagNo = q.get('tag');
+  if (tagNo) {
+    const host = document.getElementById('map');
+    host.dataset.dsAttribOut = 'host';
+    host.dataset.dsTag = tagNo;
+    // The HOST draws the number next to the tile — inside a circular mask
+    // it would get clipped.
+  }
+  const map = await window.agenticMountMaps().then((maps) => maps[0]);
+  const lat = parseFloat(q.get('lat') || '53.55');
+  const lon = parseFloat(q.get('lon') || '9.99');
+  const zoom = parseFloat(q.get('z') || '12');
+  const view = q.get('view') || 'map-light';
+  // The map was already constructed in this view (data-agentic-view above); the
+  // call stays in place as a safeguard and is then without effect.
+  map.setView(view);
+  // Theme tokens (?th=paper:…,ink:…): vector maps adopt the palette of
+  // the host — on aerial views the style stays untouched.
+  const tokens = window.agenticThemeTokens && agenticThemeTokens(q.get('th'));
+  if (tokens && view.indexOf('map') === 0) {
+    map.setFlavorOverride(agenticThemeFlavor(tokens));
+  }
+  // motion=off: print/instant context — no camera or route animation
+  // whatsoever, only the finished state.
+  const motionOff = q.get('motion') === 'off';
+  map.map.once('idle', () => {
+    map.map.jumpTo({ center: [lon, lat], zoom });
+    if (q.get('dot') !== '0') {
+      const el = document.createElement('div');
+      el.className = 'vw-dot';
+      map._marker(el, [lon, lat], 'center', null);
+    }
+    // Optional comparison overlay: ?heat=lon:lat:weight;… — meant for
+    // miniatures like "purchasing power across the region" (kernel density).
+    const heat = q.get('heat');
+    if (heat && window.agenticHeat) {
+      const points = heat.split(';').map((entry) => {
+        const p = entry.split(':').map(parseFloat);
+        return { lon: p[0], lat: p[1], weight: p[2] || 1 };
+      }).filter((p) => isFinite(p.lon) && isFinite(p.lat));
+      if (points.length) {
+        agenticHeat.cluster(map.map, { id: 'vw-heat', points,
+          radiusPx: parseFloat(q.get('heatr') || '46'), opacity: 0.6 });
+      }
+    }
+    // Georeferenced image overlay (e.g. a land-use plan laid exactly onto
+    // the map): ?img=URL&imgc=lon,lat;lon,lat;lon,lat;lon,lat (TL,TR,BR,BL)
+    // Idempotent and style-proof: setView()/setStyle() discards custom
+    // layers, and whether our addLayer lands before or after the style
+    // switch is a timing race — so re-create on EVERY style load.
+    const img = q.get('img');
+    const imgc = q.get('imgc');
+    if (img && imgc) {
+      const corners = imgc.split(';').map((c) => c.split(',').map(parseFloat));
+      if (corners.length === 4 && corners.every((c) => c.every(isFinite))) {
+        const imgOpacity = parseFloat(q.get('imgo') || '0.94');
+        // Step gate (?imgstep=N&step=M): the overlay stays invisible unless
+        // the page was loaded already past step N — let the map tell its
+        // story first, then the plan. Without ?imgstep=: visible at once.
+        // Both are read ONCE at load — this page has no live "advance to the
+        // next step" input of its own; a caller that wants the overlay to
+        // fade in mid-session (e.g. a sealed, multi-step recording — see
+        // docs/sealed-sessions.md) reloads with a higher ?step=, or drives
+        // it directly via `window.__agenticSealSteps`.
+        const imgGate = parseInt(q.get('imgstep') || '0', 10) || 0;
+        const sceneStep = parseInt(q.get('step') || '0', 10) || 0;
+        const imgTarget = () => (sceneStep >= imgGate ? imgOpacity : 0);
+        const applyImg = () => {
+          try {
+            if (!map.map.getSource('vw-img'))
+              map.map.addSource('vw-img', { type: 'image', url: img, coordinates: corners });
+            if (!map.map.getLayer('vw-img'))
+              map.map.addLayer({ id: 'vw-img', type: 'raster', source: 'vw-img',
+                paint: { 'raster-opacity': imgTarget(),
+                         'raster-fade-duration': 0 } });
+          } catch (e) { /* style mid-switch — the next load catches up */ }
+        };
+        applyImg();
+        // Re-apply idempotently after EVERY idle: a style switch (setView,
+        // flavor override) discards custom layers, and every guard that
+        // checks "it's still there, isn't it" DURING the switch loses the
+        // race. idle only fires once the new style truly stands — then the
+        // getSource/getLayer guard re-adds it for free.
+        map.map.on('idle', applyImg);
+      }
+    }
+    // Screenshot/export pipelines ask THROUGH THIS whether the map is truly
+    // done — the style stands AND (if ordered) the image overlay sits loaded
+    // in the style. A fixed waiting time loses this race at random.
+    window.__agenticMapsReady = () => {
+      try {
+        const M = map.map;
+        // The shared contract first (style, tiles, camera, animations), then
+        // this page's own ordered work on top.
+        if (!window.agenticMapsSettled()) return false;
+        if (img && imgc) {
+          if (!M.getLayer('vw-img')) return false;
+          if (!M.isSourceLoaded('vw-img')) return false;
+        }
+        return true;
+      } catch (e) { return false; }
+    };
+    // To mention a topic is to show it: optional route (e.g. the motorway
+    // through the interchange), animated in driving direction — except on
+    // the print path.
+    const routeParam = q.get('route');
+    if (routeParam) {
+      const pts = routeParam.split(';').map((c) => c.split(',').map(parseFloat));
+      if (pts.length >= 2) {
+        fetch('/api/v1/maps/route', { method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ route_id: 'vw', mode: 'car',
+            start: { lon: pts[0][0], lat: pts[0][1] },
+            end: { lon: pts[1][0], lat: pts[1][1] } }) })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((route) => {
+            if (!route) return;
+            route.color = '#' + (q.get('rcol') || 'd9a441');
+            route.animate_ms = motionOff ? 0 : 3200;
+            map.addRoute(route);
+          }).catch(() => {});
+      }
+    }
+    // View cone (?cone=1) as REAL geometry in lat/lon, not as a screen
+    // triangle: a sector polygon lies geographically correct at every zoom
+    // and every pan, which a CSS triangle in principle cannot do (its pixel
+    // dimensions hold for one single scale only).
+    if (q.get('cone') === '1') {
+      const ORBIT_M = parseFloat(q.get('orbit') || '95');   // orbit path radius
+      const FOV = parseFloat(q.get('fov') || '46');         // aperture angle
+      const REACH = parseFloat(q.get('reach') || '1.7');    // length in orbit radii
+      const gold = '#d9a441';
+      const M_LAT = 111320;
+      const mLon = 111320 * Math.cos(lat * Math.PI / 180);
+      // Point `m` metres away at bearing `deg` (0° = north, clockwise).
+      const at = (deg, m) => {
+        const r = deg * Math.PI / 180;
+        return [lon + (m * Math.sin(r)) / mLon, lat + (m * Math.cos(r)) / M_LAT];
+      };
+      const el = document.createElement('div');
+      el.className = 'vw-cone';
+      // ONE parameter for the whole URL, not a base to append to: a sealed
+      // session may pass the icon in as a data: or blob: URI (see
+      // window.__agenticAssetUrl in web/sealed-runtime.js), and you cannot
+      // append a path to one of those.
+      el.style.setProperty('--drone',
+        'url(' + (q.get('drone') || '/_stage/icons/regular/drone.svg') + ')');
+      el.innerHTML = '<b></b>';
+      const marker = map._marker(el, [lon, lat], 'center', null);
+
+      const wedge = document.createElement('div');
+      wedge.className = 'vw-wedge';
+      map.el.appendChild(wedge);
+      const edge = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      edge.setAttribute('class', 'vw-wedge-edge');
+      const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      edge.appendChild(poly);
+      map.el.appendChild(edge);
+
+      // Two geographic anchors, one angle in screen space. Re-discretising
+      // both per frame (like a sector polygon) makes the edges jump between
+      // the support points — exactly that wobble.
+      let bearing = 0;
+      const draw = () => {
+        const drone = at(bearing + 180, ORBIT_M);
+        marker.setLngLat(drone);
+        const a = map.map.project(drone);
+        const c = map.map.project([lon, lat]);
+        const dx = c.x - a.x, dy = c.y - a.y;
+        const len = Math.hypot(dx, dy) * REACH;
+        const half = len * Math.tan(FOV / 2 * Math.PI / 180);
+        // The CSS triangle opens downwards (+y); the screen angle is
+        // rotated accordingly.
+        const deg = Math.atan2(dy, dx) * 180 / Math.PI - 90;
+        wedge.style.borderWidth = '0 ' + half.toFixed(2) + 'px ' +
+          len.toFixed(2) + 'px ' + half.toFixed(2) + 'px';
+        wedge.style.transform = 'translate(' + a.x.toFixed(2) + 'px,' +
+          a.y.toFixed(2) + 'px) rotate(' + deg.toFixed(3) + 'deg) ' +
+          'translateX(' + (-half).toFixed(2) + 'px)';
+        // Outline on exactly the same three screen points as the surface.
+        const rad = (deg + 90) * Math.PI / 180;
+        const ux = Math.cos(rad), uy = Math.sin(rad);
+        const px = -uy, py = ux;                       // normal to the axis
+        const tip = [a.x, a.y];
+        const p1 = [a.x + ux * len - px * half, a.y + uy * len - py * half];
+        const p2 = [a.x + ux * len + px * half, a.y + uy * len + py * half];
+        poly.setAttribute('points',
+          [tip, p1, p2].map((q) => q[0].toFixed(1) + ',' + q[1].toFixed(1)).join(' '));
+        edge.setAttribute('width', map.el.clientWidth);
+        edge.setAttribute('height', map.el.clientHeight);
+        const drn = el.querySelector('b');
+        if (drn) drn.style.transform = 'rotate(' + deg.toFixed(2) + 'deg)';
+      };
+      // Redraw on camera movement too: the anchors are geographic, their
+      // screen position changes with every pan and zoom.
+      ['move', 'zoom', 'rotate', 'resize'].forEach((ev) => map.map.on(ev, draw));
+
+      // Read once at load (?bearing=): this page has no live "rotate the
+      // cone" input of its own — a multi-angle sweep is the caller's to
+      // author, one page load (and one `window.__agenticSealSteps` entry,
+      // if recorded — see docs/sealed-sessions.md) per bearing.
+      const setBearing = (degRaw) => {
+        bearing = ((Number(degRaw) || 0) % 360 + 360) % 360;
+        draw();
+      };
+      setBearing(parseFloat(q.get('bearing') || '0'));
+    }
+    // Motorway highlight: tint all motorways in the viewport and animate
+    // them with running dashes in driving direction (?hlmotorway=1).
+    // A single drawn route does not answer the question "how good is the
+    // connectivity?" — the network does.
+    if (q.get('hlmotorway') === '1') {
+      const gold = '#' + (q.get('hlcol') || 'f0b840');
+      const add = () => {
+        if (map.map.getLayer('vw-mw')) return;
+        try {
+          map.map.addLayer({
+            id: 'vw-mw-glow', type: 'line', source: 'streets',
+            'source-layer': 'roads', filter: ['==', ['get', 'kind'], 'highway'],
+            paint: { 'line-color': gold, 'line-opacity': 0.30,
+                     'line-width': ['interpolate', ['linear'], ['zoom'], 8, 7, 14, 20],
+                     'line-blur': 6 },
+          });
+          map.map.addLayer({
+            id: 'vw-mw', type: 'line', source: 'streets',
+            'source-layer': 'roads', filter: ['==', ['get', 'kind'], 'highway'],
+            paint: { 'line-color': gold,
+                     'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.2, 14, 6] },
+          });
+          map.map.addLayer({
+            id: 'vw-mw-flow', type: 'line', source: 'streets',
+            'source-layer': 'roads', filter: ['==', ['get', 'kind'], 'highway'],
+            paint: { 'line-color': '#fff8e6', 'line-opacity': 0.9,
+                     'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.2, 14, 3],
+                     'line-dasharray': [0, 4, 3] },
+          });
+        } catch (e) { /* vector source not there (yet) */ }
+      };
+      add();
+      map.map.on('styledata', add);
+      // Running dashes: MapLibre cannot interpolate dasharray, so we cycle
+      // through a short sequence — it reads as flow without redrawing the
+      // map.
+      if (!motionOff) {
+        const seq = [[0,4,3],[0.5,4,2.5],[1,4,2],[1.5,4,1.5],[2,4,1],
+                     [2.5,4,0.5],[3,4,0],[0,0.5,3,3.5],[0,1,3,3],[0,1.5,3,2.5],
+                     [0,2,3,2],[0,2.5,3,1.5],[0,3,3,1],[0,3.5,3,0.5]];
+        let i = 0;
+        setInterval(() => {
+          if (!map.map.getLayer('vw-mw-flow')) return;
+          i = (i + 1) % seq.length;
+          try { map.map.setPaintProperty('vw-mw-flow', 'line-dasharray', seq[i]); }
+          catch (e) {}
+        }, 90);
+      }
+    }
+  });
+  // Embedded miniature: no interaction, the host owns the mouse.
+  for (const h of ['scrollZoom','dragPan','doubleClickZoom','keyboard','touchZoomRotate'])
+    if (map.map[h]) map.map[h].disable();
+})();
+</script>
+</body>
+</html>

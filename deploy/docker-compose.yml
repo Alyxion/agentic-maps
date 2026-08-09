@@ -1,0 +1,80 @@
+# The 2-minute geo server: tile serving (agentic-maps-api), routing
+# (self-hosted Valhalla) and geocoding (self-hosted Nominatim), scoped to one
+# region. Generated/filled in by `agentic-maps-setup` (agentic_maps/setup/
+# wizard.py) or the web wizard (POST /setup/apply) — both only ever write an
+# `.env` file next to a copy of this file; the compose YAML itself is never
+# regenerated, see `models/setup_plan.py`'s docstring for why.
+#
+# Manual use (skip the wizard): copy this file, docker-compose.offline.yml
+# and Dockerfile somewhere, write your own `.env` (see docs/setup-guide.md
+# for every key), then:
+#   docker compose up -d
+#
+# Image/env var sources (verified against each project's own docs, not
+# guessed — see docs/setup-guide.md's "what we verified" section):
+# - valhalla: the official `ghcr.io/valhalla/valhalla-scripted` image
+#   (github.com/valhalla/valhalla/blob/master/docker/README.md), superseding
+#   the earlier gis-ops/docker-valhalla image (now archived, folded upstream
+#   with the same env var contract).
+# - nominatim: `mediagis/nominatim` (github.com/mediagis/nominatim-docker),
+#   the standard/most-maintained Nominatim image.
+services:
+  agentic-maps-api:
+    build:
+      context: ${AGENTIC_MAPS_REPO_ROOT:-..}
+      dockerfile: deploy/Dockerfile
+    environment:
+      - AGENTIC_MAPS_VALHALLA_URL=${AGENTIC_MAPS_VALHALLA_URL:-http://valhalla:8002}
+      - AGENTIC_MAPS_NOMINATIM_URL=${AGENTIC_MAPS_NOMINATIM_URL:-http://nominatim:8080}
+      - AGENTIC_MAPS_MODE=${AGENTIC_MAPS_MODE:-online}
+    ports:
+      - "${AGENTIC_MAPS_API_PORT:-8095}:8095"
+    depends_on:
+      - valhalla
+      - nominatim
+
+  # Graph build on first boot: reads tile_urls (a PBF URL) or any .osm.pbf
+  # file already present under the ./valhalla_data mount, builds the routing
+  # graph, then serves it. Subsequent restarts skip the build and just load
+  # the tarball, unless the PBF changed (use_tiles_ignore_pbf=False here
+  # means "check on every restart", the opposite of docker-compose.offline
+  # .yml's override — see that file).
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    environment:
+      - tile_urls=${VALHALLA_TILE_URLS:-}
+      - use_tiles_ignore_pbf=False
+      - build_admins=True
+      - build_time_zones=False
+      - build_elevation=False
+      - server_threads=2
+    volumes:
+      - ./valhalla_data:/custom_files
+    ports:
+      - "${VALHALLA_PORT:-8002}:8002"
+
+  # Import on first boot: PBF_URL (downloaded then discarded) or PBF_PATH
+  # (a file already present under ./nominatim_data) gets imported into the
+  # bundled Postgres, then the container serves the search/reverse API.
+  # IMPORT_STYLE=street keeps the import to admin boundaries + streets
+  # (fast) rather than the `full` default (also imports every POI) — plenty
+  # for routing endpoints/geocoding place names; switch to `full` in .env
+  # (NOMINATIM_IMPORT_STYLE) if you need POI search.
+  nominatim:
+    image: mediagis/nominatim:5.3
+    environment:
+      - PBF_URL=${NOMINATIM_PBF_URL:-}
+      - PBF_PATH=${NOMINATIM_PBF_PATH:-}
+      - IMPORT_STYLE=${NOMINATIM_IMPORT_STYLE:-street}
+      - NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD:-agentic-maps-setup}
+    volumes:
+      - ./nominatim_data:/nominatim/data
+      - nominatim-db:/var/lib/postgresql/16/main
+    # Nominatim's own docs recommend shm-size >= 1GB for imports past a tiny
+    # town; harmless at city scale, necessary past it.
+    shm_size: "1gb"
+    ports:
+      - "${NOMINATIM_PORT:-8080}:8080"
+
+volumes:
+  nominatim-db:

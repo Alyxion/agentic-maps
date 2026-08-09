@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agentic-maps setup</title>
+<!--
+  The web front-end for the "2-minute geo server" (docs/setup-guide.md),
+  mirroring the CLI wizard's steps (place -> mode -> profiles -> review ->
+  launch) 1:1 — both call the identical planner (agentic_maps/setup/planner.py)
+  through POST /setup/plan and POST /setup/apply (agentic_maps/rest/setup_api.py),
+  so nothing about the planning logic is duplicated in JS here.
+
+  Vendoring convention: this follows web/globe.js's own pattern — the shared
+  llming-stage vendor bundle (Vue, Quasar, fonts; NOT vendored a second time
+  in web/vendor/, see AGENTS.md) mounted at `window.agenticStageVendor`
+  (default `/_stage/vendor`, same constant as devserver.py's
+  STAGE_ASSET_PREFIX). Unlike globe.js's ESM `import()` of three.js, Vue and
+  Quasar ship as classic UMD bundles (`vue.global.prod.js`,
+  `quasar.umd.prod.js` + `quasar.prod.css`) that attach `Vue`/`Quasar`
+  globals — that is the documented llming-stage vendor contract, not a
+  choice made here.
+
+  UNVERIFIED LIVE: llming-stage is a private package not resolvable in every
+  environment (see docs/development.md's note on the dev-server/globe/debug
+  extras) — this page is written against that documented vendor contract but
+  has not been exercised against a real llming-stage install in this change.
+-->
+<link rel="stylesheet" id="quasar-css" href="/_stage/vendor/quasar.prod.css">
+<style>
+  html, body { margin: 0; min-height: 100%; background: #10151c; color: #e8edf3;
+    font-family: 'Helvetica Neue', -apple-system, Arial, sans-serif; }
+  #app { max-width: 640px; margin: 0 auto; padding: 32px 20px 80px; }
+  .am-card { background: #171f2b; border-radius: 12px; padding: 24px; margin-bottom: 16px;
+    box-shadow: 0 6px 22px rgba(0,0,0,0.35); }
+  h1 { font-size: 22px; font-weight: 600; }
+  .am-steps { display: flex; gap: 8px; margin-bottom: 24px; }
+  .am-step-dot { flex: 1; height: 4px; border-radius: 2px; background: #2a3441; }
+  .am-step-dot.am-step-done { background: #4c8dff; }
+  .am-hint { color: #93a2b5; font-size: 13px; line-height: 1.5; }
+  .am-warning { background: #3a2a10; border: 1px solid #a06a1a; color: #f0c47a;
+    border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-top: 10px; }
+  .am-env { background: #0c1119; border-radius: 8px; padding: 12px; font: 12px/1.5 monospace;
+    white-space: pre-wrap; max-height: 260px; overflow: auto; }
+  .am-actions { display: flex; gap: 10px; margin-top: 20px; }
+  .am-ready-list a { color: #7cb2ff; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>agentic-maps setup</h1>
+  <p class="am-hint">Tile serving, self-hosted routing (Valhalla) and geocoding
+    (Nominatim), scoped to one place. Same wizard as <code>agentic-maps setup</code>
+    on the command line — see <a href="/../../docs/setup-guide.md" class="am-hint">docs/setup-guide.md</a>
+    for what "2 minutes" honestly covers.</p>
+
+  <div class="am-steps">
+    <div class="am-step-dot" :class="{ 'am-step-done': step > 0 }"></div>
+    <div class="am-step-dot" :class="{ 'am-step-done': step > 1 }"></div>
+    <div class="am-step-dot" :class="{ 'am-step-done': step > 2 }"></div>
+    <div class="am-step-dot" :class="{ 'am-step-done': step > 3 }"></div>
+    <div class="am-step-dot" :class="{ 'am-step-done': step > 4 }"></div>
+  </div>
+
+  <!-- Step 0: place -->
+  <div class="am-card" v-if="step === 0">
+    <q-input v-model="answers.place" label="Place (city or town)" outlined dense dark
+      placeholder="e.g. Hannover, Germany" />
+    <p class="am-hint">Or paste an explicit bbox instead (west,south,east,north):</p>
+    <q-input v-model="bboxText" label="Bbox override (optional)" outlined dense dark
+      placeholder="9.70,52.35,9.78,52.40" />
+    <div class="am-actions">
+      <q-btn color="primary" label="Next" @click="step = 1" :disable="!answers.place && !bboxText" />
+    </div>
+  </div>
+
+  <!-- Step 1: mode -->
+  <div class="am-card" v-if="step === 1">
+    <p>Mode</p>
+    <q-option-group v-model="answers.mode" dark
+      :options="[
+        { label: 'Mixed (self-hosted routing/geocoding, live tiles still allowed)', value: 'mixed' },
+        { label: 'Online (containers may reach the internet freely)', value: 'online' },
+        { label: 'Offline (no internet after the first build/import)', value: 'offline' },
+      ]" />
+    <p class="am-hint">Profiles (advisory only — Valhalla always builds every costing model;
+      this just filters what the API/UI offer):</p>
+    <q-option-group v-model="answers.profiles" type="checkbox" dark
+      :options="[
+        { label: 'Car', value: 'car' }, { label: 'Truck', value: 'truck' },
+        { label: 'Walk', value: 'walk' }, { label: 'Bike', value: 'bike' },
+      ]" />
+    <div class="am-actions">
+      <q-btn flat label="Back" @click="step = 0" />
+      <q-btn color="primary" label="Next" @click="fetchPlan" :loading="planning" />
+    </div>
+  </div>
+
+  <!-- Step 2: review -->
+  <div class="am-card" v-if="step === 2 && plan">
+    <p>Region: <strong>{{ plan.region_id }}</strong> ({{ plan.bbox.west.toFixed(3) }},
+      {{ plan.bbox.south.toFixed(3) }}, {{ plan.bbox.east.toFixed(3) }}, {{ plan.bbox.north.toFixed(3) }})</p>
+    <p>PBF source: <strong>{{ plan.pbf.method }}</strong> — {{ plan.pbf.note }}</p>
+    <div class="am-warning" v-for="w in plan.warnings" :key="w">{{ w }}</div>
+    <p class="am-hint" style="margin-top:14px">Generated .env (review before applying):</p>
+    <div class="am-env">{{ plan.env_content }}</div>
+    <q-input v-model="outDir" label="Output directory" outlined dense dark />
+    <div class="am-actions">
+      <q-btn flat label="Back" @click="step = 1" />
+      <q-btn color="primary" label="Write files" @click="apply(false)" :loading="applying" />
+      <q-btn color="secondary" label="Write + docker compose up" @click="apply(true)" :loading="applying" />
+    </div>
+  </div>
+
+  <!-- Step 3: launch result -->
+  <div class="am-card" v-if="step === 3 && applyResult">
+    <p>{{ applyResult.run.message }}</p>
+    <ul class="am-ready-list">
+      <li v-for="(url, name) in applyResult.run.ready_urls" :key="name">
+        {{ name }}: <a :href="url" target="_blank">{{ url }}</a>
+      </li>
+    </ul>
+    <div class="am-actions">
+      <q-btn color="primary" label="Offline-Daten (optional)" @click="step = 4" />
+      <q-btn flat label="Start over" @click="reset" />
+    </div>
+  </div>
+
+  <!-- Step 4: Offline-Daten (optional, skippable). Same presets and the same
+       size table as the MCP tool and the CLI wizard — the numbers come from
+       POST /api/v1/maps/provision/estimate (provision/estimates.py, the one
+       source of size truth), never from this page. -->
+  <div class="am-card" v-if="step === 4">
+    <p>Offline-Daten — whole-region data packs (optional)</p>
+    <p class="am-hint">Estimate first, download second: nothing is fetched until
+      you confirm the size. Jobs are resumable — already-cached tiles are skipped.</p>
+    <q-option-group v-model="offline.region" dark
+      :options="[
+        { label: 'Germany (de)', value: 'de' },
+        { label: 'DACH — DE+AT+CH (dach)', value: 'dach' },
+        { label: 'Europe (eu) — hundreds of GB, read the warning', value: 'eu' },
+        { label: 'Earth base imagery z0-12 (earth)', value: 'earth' },
+      ]" />
+    <q-option-group v-model="offline.layers" type="checkbox" dark v-if="offline.region !== 'earth'"
+      :options="[
+        { label: 'Vector streets/labels (maps)', value: 'maps' },
+        { label: 'Aerial imagery pyramid (aerial)', value: 'aerial' },
+        { label: 'Routing PBF for Valhalla/Nominatim (routing)', value: 'routing' },
+      ]" />
+    <div v-if="offline.region !== 'earth' && offline.layers.includes('aerial')">
+      <p class="am-hint">Aerial zoom cap — the size dial (z17+ is deliberately not
+        offered; full resolution stays a corridor harvest):</p>
+      <q-option-group v-model="offline.zoom" inline dark
+        :options="[
+          { label: 'z13', value: 13 }, { label: 'z14', value: 14 },
+          { label: 'z15', value: 15 }, { label: 'z16', value: 16 },
+        ]" />
+    </div>
+    <div class="am-actions">
+      <q-btn color="primary" label="Estimate size" @click="fetchOfflineEstimate" :loading="estimating" />
+      <q-btn flat label="Skip" @click="reset" />
+    </div>
+    <div v-if="offlineEstimate" style="margin-top:14px">
+      <p v-for="l in offlineEstimate.layers" :key="l.layer">{{ l.display }}</p>
+      <div class="am-warning" v-for="w in offlineEstimate.warnings" :key="w">{{ w }}</div>
+      <div class="am-actions">
+        <q-btn color="secondary" :label="'Download ' + offlineEstimate.total_display"
+          @click="startOfflineJob" :loading="starting" />
+      </div>
+    </div>
+    <div v-if="offlineJob" style="margin-top:14px">
+      <p>Job <code>{{ offlineJob.id }}</code>: <strong>{{ offlineJob.state }}</strong>
+        — {{ offlineJob.phase }}</p>
+      <p class="am-hint" v-for="l in offlineJob.layers" :key="l.layer">
+        {{ l.layer }}: {{ l.status }}
+        <span v-if="l.tiles_total"> — {{ l.tiles_done }}/{{ l.tiles_total }} tiles</span>
+        <span v-if="l.bytes_done"> — {{ (l.bytes_done / 1e6).toFixed(1) }} MB</span>
+        <span v-if="l.next_command"> — next: <code>{{ l.next_command }}</code></span>
+      </p>
+      <div class="am-actions" v-if="offlineJob.state === 'running'">
+        <q-btn flat label="Cancel job" @click="cancelOfflineJob" />
+      </div>
+      <div class="am-actions" v-else>
+        <q-btn flat label="Done" @click="reset" />
+      </div>
+    </div>
+  </div>
+
+  <div class="am-card" v-if="error">
+    <p style="color:#f5a3a3">{{ error }}</p>
+    <q-btn flat label="Back" @click="error = ''" />
+  </div>
+</div>
+
+<script>
+  // Same convention web/index.html and web/globe.js already use: the shell
+  // mount point may be relocated by a host, so it is one variable, not a
+  // hardcoded string sprinkled through the page.
+  window.agenticStageVendor = window.agenticStageVendor || '/_stage/vendor';
+  document.getElementById('quasar-css').href = window.agenticStageVendor + '/quasar.prod.css';
+</script>
+<script src="/_stage/vendor/vue.global.prod.js"></script>
+<script src="/_stage/vendor/quasar.umd.prod.js"></script>
+<script>
+(() => {
+  const { createApp, ref, reactive, watch } = Vue;
+
+  function parseBbox(text) {
+    const parts = text.split(',').map((s) => parseFloat(s.trim()));
+    if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return null;
+    const [west, south, east, north] = parts;
+    return { west, south, east, north };
+  }
+
+  const App = {
+    setup() {
+      const step = ref(0);
+      const bboxText = ref('');
+      const answers = reactive({ place: '', mode: 'mixed', profiles: ['car'], region_id: '', pbf_url: '' });
+      const plan = ref(null);
+      const planning = ref(false);
+      const applying = ref(false);
+      const applyResult = ref(null);
+      const outDir = ref('agentic-maps-stack');
+      const error = ref('');
+
+      const post = async (url, body) => {
+        const response = await fetch(url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.detail || `${url} failed (${response.status})`);
+        }
+        return response.json();
+      };
+
+      const fetchPlan = async () => {
+        planning.value = true;
+        error.value = '';
+        try {
+          const bbox = parseBbox(bboxText.value);
+          const body = { ...answers, bbox };
+          plan.value = await post('/setup/plan', body);
+          step.value = 2;
+        } catch (err) {
+          error.value = String(err.message || err);
+        } finally {
+          planning.value = false;
+        }
+      };
+
+      const apply = async (run) => {
+        applying.value = true;
+        error.value = '';
+        try {
+          const bbox = parseBbox(bboxText.value);
+          applyResult.value = await post('/setup/apply', {
+            answers: { ...answers, bbox },
+            out_dir: outDir.value,
+            run,
+          });
+          step.value = 3;
+        } catch (err) {
+          error.value = String(err.message || err);
+        } finally {
+          applying.value = false;
+        }
+      };
+
+      // -- Offline-Daten (step 4): estimate → confirm → poll the job ------
+      const offline = reactive({ region: 'de', layers: ['maps', 'routing'], zoom: 14 });
+      const offlineEstimate = ref(null);
+      const offlineJob = ref(null);
+      const estimating = ref(false);
+      const starting = ref(false);
+      let pollTimer = null;
+
+      const offlineBody = () => ({
+        region: offline.region,
+        layers: offline.region === 'earth' ? ['aerial'] : offline.layers,
+        aerial_max_zoom: (offline.region !== 'earth' && offline.layers.includes('aerial'))
+          ? offline.zoom : null,
+      });
+
+      const fetchOfflineEstimate = async () => {
+        estimating.value = true;
+        error.value = '';
+        offlineEstimate.value = null;
+        try {
+          offlineEstimate.value = await post('/api/v1/maps/provision/estimate', offlineBody());
+        } catch (err) {
+          error.value = String(err.message || err);
+        } finally {
+          estimating.value = false;
+        }
+      };
+
+      const pollOfflineJob = async () => {
+        if (!offlineJob.value) return;
+        const response = await fetch(`/api/v1/maps/provision/${offlineJob.value.id}`);
+        if (response.ok) offlineJob.value = await response.json();
+        if (offlineJob.value && offlineJob.value.state === 'running') {
+          pollTimer = setTimeout(pollOfflineJob, 2000);
+        }
+      };
+
+      const startOfflineJob = async () => {
+        starting.value = true;
+        error.value = '';
+        try {
+          offlineJob.value = await post('/api/v1/maps/provision', offlineBody());
+          pollTimer = setTimeout(pollOfflineJob, 2000);
+        } catch (err) {
+          error.value = String(err.message || err);
+        } finally {
+          starting.value = false;
+        }
+      };
+
+      const cancelOfflineJob = async () => {
+        if (!offlineJob.value) return;
+        try {
+          offlineJob.value = await post(`/api/v1/maps/provision/${offlineJob.value.id}/cancel`, {});
+        } catch (err) {
+          error.value = String(err.message || err);
+        }
+      };
+
+      const reset = () => {
+        step.value = 0;
+        plan.value = null;
+        applyResult.value = null;
+        error.value = '';
+        offlineEstimate.value = null;
+        offlineJob.value = null;
+        if (pollTimer) clearTimeout(pollTimer);
+      };
+
+      return { step, bboxText, answers, plan, planning, applying, applyResult, outDir, error,
+               fetchPlan, apply, reset,
+               offline, offlineEstimate, offlineJob, estimating, starting,
+               fetchOfflineEstimate, startOfflineJob, cancelOfflineJob };
+    },
+  };
+
+  const app = createApp(App);
+  app.use(Quasar, { config: { dark: true } });
+  app.mount('#app');
+})();
+</script>
+</body>
+</html>

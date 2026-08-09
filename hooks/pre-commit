@@ -1,0 +1,32 @@
+#!/bin/sh
+# Content policy gate. Blocks commits whose staged changes contain terms on
+# the project's restricted list. The list is stored encoded so the gate is
+# not itself a hit for the terms it polices; decode happens only at runtime.
+# Enabled via:  git config core.hooksPath hooks
+
+decode() {
+    printf '%s' "$1" | xxd -r -p 2>/dev/null || printf '%s' "$1" | perl -ne 'print pack("H*", $_)'
+}
+
+# Restricted patterns, hex-encoded ERE fragments (case-insensitive match).
+_P1=$(decode "6c6563686c6572")
+_P2=$(decode "64796e616d69635b202d5f5d3f736c69646573")
+_P3=$(decode "64796e736c69646573")
+_P4=$(decode "6465636b")
+PATTERN="${_P1}|${_P2}|${_P3}|${_P4}"
+
+# Added lines of the staged diff, plus staged path names.
+HITS=$(
+    {
+        git diff --cached -U0 --no-color | grep '^+' | grep -viE '^\+\+\+'
+        git diff --cached --name-only
+    } | grep -inE "$PATTERN"
+)
+
+if [ -n "$HITS" ]; then
+    echo "commit blocked: restricted terms present in staged changes." >&2
+    echo "$HITS" | head -10 >&2
+    echo "(policy gate: hooks/pre-commit — see also the harness sweep)" >&2
+    exit 1
+fi
+exit 0

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agentic-maps — render</title>
+<link rel="stylesheet" href="./vendor/maplibre-gl.css">
+<link rel="stylesheet" href="./map.css">
+<style>
+  /* Nothing but the map. This page is never opened by a person — it exists
+     only for RenderService (agentic_maps/render/service.py) to navigate a
+     headless-Chromium tab to and screenshot #map. The screenshot targets the
+     element directly, so no page chrome would leak into it either way, but a
+     smaller page settles sooner regardless. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #10151c; }
+  #stage { position: absolute; inset: 0; }
+  #map { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="map" data-agentic-map></div></div>
+<script src="./vendor/maplibre-gl.js"></script>
+<script src="./vendor/basemaps.js"></script>
+<script src="./road-styles.js"></script>
+<script src="./palette-canvas.js"></script>
+<script src="./palette-theme.js"></script>
+<script>
+  // RenderService navigates here with ?token=<uuid>. The token was minted
+  // server-side by MapsApi._store_render_payload() (rest/maps_api.py) when
+  // POST /render ran MapsApi.build_payload() on the caller's spec — this
+  // page fetches it back the same way index.html/view.html fetch their own
+  // fixed spec URLs (`data-agentic-spec-url`), just a per-request one.
+  //
+  // The path is hardcoded to MapsApi's default `prefix` — same pre-existing
+  // limitation view.html's own hardcoded `/api/v1/maps/route` call already
+  // has: a host that mounts MapsApi at a different prefix needs this page
+  // adjusted too.
+  (function () {
+    const token = new URLSearchParams(location.search).get('token');
+    document.getElementById('map').setAttribute('data-agentic-spec-url',
+      '/api/v1/maps/render/payload/' + encodeURIComponent(token || ''));
+  })();
+</script>
+<script src="./map.js"></script>
+<script>
+  // A render is a fixed snapshot of the spec's own camera (spec.overview, or
+  // its first location) — never an interactive surface, so every input
+  // handler is switched off once mounted.
+  window.agenticMountMaps().then((maps) => {
+    const map = maps[0];
+    if (!map) return;
+    for (const h of ['scrollZoom', 'dragPan', 'doubleClickZoom', 'keyboard', 'touchZoomRotate'])
+      if (map.map[h]) map.map[h].disable();
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,267 @@
+/* agentic-maps runtime styles — prefixed am-map- (host CSS collision rule). */
+
+.am-map-highlight {
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  backdrop-filter: blur(1.5px);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.22) inset;
+  pointer-events: none;
+  transition: opacity 350ms;
+}
+
+.am-map-highlight span {
+  font-family: 'Georgia', 'Times New Roman', serif;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #2c3540;
+  text-shadow: 0 0 5px rgba(255, 255, 255, 0.85);
+  max-width: 85%;
+}
+
+.am-map-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+  transition: opacity 350ms;
+}
+
+.am-map-pin-bubble {
+  border-radius: 50%;
+  border: 3px solid #fff;
+  background: #1d2732;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.am-map-pin-bubble img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.am-map-pin-bubble span {
+  color: #f3f6fa;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  /* Multi-word labels wrap and centre inside the circle. */
+  white-space: normal;
+  text-align: center;
+  line-height: 1.2;
+  padding: 0 9%;
+  max-width: 100%;
+}
+
+.am-map-route-badge {
+  background: rgba(20, 26, 34, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  color: #f3f6fa;
+  font: 600 13px 'Helvetica Neue', Arial, sans-serif;
+  padding: 5px 11px;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.am-map-route-badge .glyph { display: flex; }
+.am-map-route-badge .glyph svg { width: 15px; height: 15px; }
+.am-map-route-badge .txt { display: flex; flex-direction: column; line-height: 1.25; }
+/* The brief place line under an alternative's numbers ("über Pforzheim"). */
+.am-map-route-badge .via { font-weight: 500; font-size: 11px; opacity: 0.75; }
+/* An ALTERNATIVE's badge: light, like Google's not-yet-chosen routes — and
+   clickable (the dark primary badge stays pointer-events: none). */
+.am-map-route-badge-light {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(20, 26, 34, 0.25);
+  color: #33404f;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+}
+
+/* Destination markers that outlive the route animation: a white disc with a
+   drawn pictogram and the route's colour as its ring. */
+.am-map-poi {
+  width: 34px; height: 34px; border-radius: 50%;
+  background: #ffffff; border: 2.5px solid #10151c;
+  display: flex; align-items: center; justify-content: center;
+  color: #1f2733; box-shadow: 0 5px 14px rgba(0,0,0,0.4);
+  pointer-events: none;
+}
+.am-map-poi svg { width: 19px; height: 19px; }
+.am-map-poi-label {
+  margin-top: 4px; background: rgba(20,26,34,0.86); color: #eef3f8;
+  font: 600 11px 'Helvetica Neue', Arial, sans-serif;
+  padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+}
+.am-map-poi-wrap { display: flex; flex-direction: column; align-items: center;
+  pointer-events: none; }
+
+/* Sonar-style attention ping: expanding rings + optional label. */
+.am-map-ping {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  transition: opacity 350ms;
+}
+.am-map-ping i {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(124, 196, 255, 0.9);
+  background: rgba(124, 196, 255, 0.25);
+  /* Attention is an impulse, not a permanent state: three pulses, then
+     only the resting core + label remain. */
+  opacity: 0;
+  animation: am-ping 2.2s cubic-bezier(0.2, 0.6, 0.4, 1) 3;
+}
+.am-map-ping b {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 11px; height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  border-radius: 50%;
+  background: rgba(124, 196, 255, 0.95);
+  border: 2px solid #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+}
+.am-map-ping i:nth-child(2) { animation-delay: 0.55s; }
+.am-map-ping i:nth-child(3) { animation-delay: 1.1s; }
+/* Static variant: a resting ring, no sonar pulses (print state). */
+.am-map-ping.still i { animation: none; transform: scale(0.85); opacity: 0.6; }
+.am-map-ping.still i:nth-child(2),
+.am-map-ping.still i:nth-child(3) { display: none; }
+.am-map-ping span {
+  /* A chip instead of bare text: white on a bright map is unreadable. The
+     position is set by _layoutLabels() — it dodges its neighbours. */
+  position: absolute;
+  top: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #f2f6fb;
+  background: rgba(15, 21, 30, 0.88);
+  padding: 3px 9px;
+  border-radius: 7px;
+  font: 600 11px 'Helvetica Neue', Arial, sans-serif;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+@keyframes am-ping {
+  0% { transform: scale(0.6); opacity: 1; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+
+.am-map-route-head {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.7);
+  pointer-events: none;
+}
+
+/* Search result marker (map-app mode) — a teardrop, not a scenario pin.
+   The marker is placed with anchor:'bottom', so the element's bottom-centre
+   IS the geographic point: the caption sits ABOVE the drop (column-reverse —
+   a caption below the tip pushed the tip ~25 px off its coordinate, which
+   read as drift while zooming), and the drop's rotated tip pokes ~4 px past
+   its own box, compensated by the margin so tip == bottom edge. */
+.am-map-search-pin {
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.45));
+}
+.am-map-search-pin i {
+  width: 16px;
+  height: 16px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  background: #e2574c;
+  border: 2px solid #fff;
+  /* rotated corner overhang: (20·√2 − 20) / 2 ≈ 4 px below the box */
+  margin-bottom: 4px;
+}
+.am-map-search-pin span {
+  background: rgba(20, 26, 34, 0.85);
+  color: #eef3f8;
+  font: 600 12px 'Helvetica Neue', Arial, sans-serif;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.am-map-geo-label {
+  background: rgba(20, 26, 34, 0.82);
+  border: 1px solid #fff;
+  color: #eef3f8;
+  font: 600 11px 'Helvetica Neue', Arial, sans-serif;
+  letter-spacing: 0.05em;
+  padding: 4px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* "You are here" — the locate-me control's result: a blue dot with a soft
+   halo, the same convention every map app uses for the device's own GPS fix
+   (deliberately distinct from the red teardrop search/click pin above). */
+.am-map-me {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #2a6fd6; border: 3px solid #fff;
+  box-shadow: 0 0 0 6px rgba(42, 111, 214, 0.28), 0 2px 8px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+/* pointer tip below the bubble */
+.am-map-pin::after {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 11px solid transparent;
+  border-right: 11px solid transparent;
+  border-top: 17px solid #fff;
+  margin-top: -4px;
+}
+
+/* --- Attribution -----------------------------------------------------
+   Legally mandatory and therefore under its own rules:
+   - the smallest still-legible size (11px/1.25) — that fulfils the
+     obligation, more area it does not take;
+   - it shares the corner radius with the container, so it sits fully in
+     the corner instead of sticking out past the rounded edge;
+   - z-index above all map decorations: it may be covered by NOTHING
+     (see docs/concepts/map-attribution.md).
+   ------------------------------------------------------------------- */
+.maplibregl-ctrl-bottom-right .maplibregl-ctrl-attrib,
+.maplibregl-ctrl-attrib {
+  font: 400 11px/13px 'Helvetica Neue', Arial, sans-serif !important;
+  padding: 1px 7px 2px !important;
+  margin: 0 !important;
+  background: rgba(255, 255, 255, 0.86) !important;
+  color: #1b2430 !important;
+  border-radius: var(--am-map-radius, 14px) 0 var(--am-map-radius, 14px) 0 !important;
+  z-index: 60 !important;                 /* above pins, labels, routes */
+  pointer-events: auto;
+}
+.maplibregl-ctrl-attrib a { color: #1b2430 !important; text-decoration: none; }
+.maplibregl-ctrl-bottom-right { z-index: 60 !important; margin: 0 !important; }
+.maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin: 0 !important; }
+/* The expand button is dropped: the credit is shown permanently. */
+.maplibregl-ctrl-attrib-button { display: none !important; }

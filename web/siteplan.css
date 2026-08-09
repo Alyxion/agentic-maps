@@ -1,0 +1,87 @@
+/* Site plan — the stylised look, in ONE place.
+
+   The renderer emits classes only, never colours, so a host page gets this
+   look by linking the stylesheet rather than by carrying its own copy of it. Every
+   colour is a custom property with a dark default; a host that has its own
+   palette overrides the four `--sp-*` tokens and nothing else.
+
+   Tokens: --sp-ink (headline), --sp-muted (secondary), --sp-line (hairline),
+   --sp-accent (boundary + rose), --sp-street (carriageway), --sp-fill. */
+.sp-plan {
+  --sp-ink: var(--im-ink, #eef3f8);
+  --sp-muted: var(--im-muted, #93a1b3);
+  --sp-line: var(--im-line, rgba(255, 255, 255, .09));
+  --sp-accent: var(--im-gold, #d9a441);
+  --sp-accent-soft: var(--im-goldline, rgba(217, 164, 65, .45));
+  --sp-street: #0a0f18;
+  --sp-fill: rgba(255, 255, 255, .07);
+}
+.sp-plan .sp-bg { fill: rgba(255, 255, 255, .035); stroke: var(--sp-line); }
+
+/* Streets are the skeleton and are drawn at their REAL width — the renderer
+   sets stroke-width per way. A constant stroke made the plot boundary look
+   as though it ran through the carriageway. */
+.sp-plan .sp-street {
+  fill: none; stroke: var(--sp-street);
+  stroke-linecap: round; stroke-linejoin: round; opacity: .85;
+}
+.sp-plan .sp-streets { filter: drop-shadow(0 0 1px rgba(0, 0, 0, .6)); }
+.sp-plan .sp-street-name {
+  fill: var(--sp-muted); font: 400 12.5px 'Segoe UI', Arial, sans-serif;
+  letter-spacing: .18em; text-anchor: middle; text-transform: uppercase;
+}
+
+/* The site boundary: dashed accent, like the parcels on the map. */
+.sp-plan .sp-plot {
+  fill: rgba(217, 164, 65, .07); stroke: var(--sp-accent);
+  stroke-width: 2; stroke-dasharray: 7 4;
+}
+
+.sp-plan .sp-area path { transition: fill .5s ease, stroke .5s ease; }
+.sp-plan .sp-building path { fill: var(--sp-fill); stroke: var(--sp-accent-soft); stroke-width: 1.5; }
+.sp-plan .sp-yard path {
+  fill: rgba(217, 164, 65, .10); stroke: var(--sp-accent-soft);
+  stroke-width: 1; stroke-dasharray: 3 3;
+}
+/* Circulation reads as surface, not as a building: one stroked line with
+   round joins, so bends have no seam and the gate meets the carriageway. */
+.sp-plan .sp-road path {
+  fill: none; stroke: rgba(255, 255, 255, .13);
+  stroke-linejoin: round; stroke-linecap: butt;
+}
+
+.sp-plan .sp-name {
+  fill: var(--sp-ink); font: 600 19px 'Segoe UI', Arial, sans-serif;
+  text-anchor: middle; letter-spacing: .02em;
+}
+.sp-plan .sp-yard-label {
+  fill: var(--sp-muted); font: 400 13px 'Segoe UI', Arial, sans-serif;
+  text-anchor: middle;
+}
+.sp-plan .sp-area-note {
+  fill: var(--sp-muted); font: 400 14px 'Segoe UI', Arial, sans-serif;
+  text-anchor: middle;
+}
+
+/* Compass rose: a ring with a needle, not a triangle with a letter on top. */
+.sp-plan .sp-rose-ring { fill: none; stroke: var(--sp-accent-soft); stroke-width: 1; }
+.sp-plan .sp-rose-tick { stroke: var(--sp-accent-soft); stroke-width: 1; }
+.sp-plan .sp-rose-n { fill: var(--sp-accent); }
+.sp-plan .sp-rose-s { fill: var(--sp-muted); opacity: .55; }
+.sp-plan .sp-rose-label {
+  fill: var(--sp-accent); font: 600 12px 'Segoe UI', Arial, sans-serif;
+  text-anchor: middle; letter-spacing: .1em;
+}
+
+.sp-plan .sp-scale path { fill: none; stroke: var(--sp-muted); stroke-width: 1.4; }
+.sp-plan .sp-scale text {
+  fill: var(--sp-muted); font: 400 12px 'Segoe UI', Arial, sans-serif;
+  text-anchor: middle;
+}
+
+/* Step reveal: the host adds `.on` to the group it is talking about. Gold
+   fill, not just a brighter edge — on a dark plan a stroke change alone is
+   not visible. */
+.sp-plan .sp-area.on path {
+  fill: rgba(217, 164, 65, .22); stroke: var(--sp-accent); stroke-width: 2.5;
+}
