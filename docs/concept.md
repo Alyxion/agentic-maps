@@ -40,7 +40,7 @@ selects open-data sources:
 | **German state orthophotos** — all 16 state surveys (table below) | 20 cm color aerials (Bremen 10 cm) via keyless EPSG:3857 WMS; DL-DE/BY-2.0, DL-DE-**Zero**-2.0 or CC BY 4.0 depending on state | ✅ **Primary imagery**, federated nationwide (§3 composite) |
 | **BKG `wms_dop`** (Germany-wide 20 cm) | Open data DL-DE/BY-2.0; GetMap needs free registration (personalized URL) | ✅ Nationwide fallback via `AGENTIC_MAPS_BKG_URL` |
 | **OpenStreetMap via Protomaps builds** | Planet vector basemap as single PMTiles file, free bulk download + regional `pmtiles extract`; ODbL attribution | ✅ **Street/label/basemap data** |
-| **Protomaps basemap styles + assets** (`@protomaps/basemaps`, fonts, sprites) | Styles CC0, fonts OFL, sprites CC0; all vendorable | ✅ **Professional cartography** (§4) |
+| **Protomaps basemap styles + assets** (`@protomaps/basemaps`, fonts, sprites) | Style code BSD-3-Clause, visual design CC0, fonts OFL, sprites MIT (per upstream LICENSE files — see THIRD-PARTY.md); all vendorable | ✅ **Professional cartography** (§4) |
 | OSRM / Geofabrik OSM extracts | Self-hostable, ODbL | ✅ Routing at authoring time (§6) |
 | GTFS open data (DELFI Germany-wide, VVS Stuttgart, …) | Official transit lines/stops/schedules, open licenses | ✅ Transit routes/times, roadmap (§7) |
 | Natural Earth / NASA Blue Marble | Public domain | ✅ Optional globe zooms |

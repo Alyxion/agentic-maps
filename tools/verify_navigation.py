@@ -227,7 +227,24 @@ async def build_route(page) -> None:
 
 
 async def start_nav(page) -> None:
-    await page.click("#btn-nav-start")
+    # The subtle "Simulieren" link (the old prominent Start pill is gone).
+    await page.click("#btn-nav-simulate")
+    await page.wait_for_function(
+        "() => document.body.classList.contains('nav-mode')", timeout=5000
+    )
+    await page.wait_for_timeout(600)
+
+
+async def start_nav_via_dev(page) -> None:
+    """The mobile path: the route panel carries NO simulation entry on a
+    narrow viewport (by design) — the dev panel's Simulation section is
+    the way into the drive there."""
+    await page.evaluate(
+        "() => { if (!document.getElementById('dev').classList"
+        ".contains('open')) document.getElementById('btn-dev').click();"
+        " document.querySelector('[data-section=simulation]')"
+        ".setAttribute('open', ''); }")
+    await page.click("#dev-nav")
     await page.wait_for_function(
         "() => document.body.classList.contains('nav-mode')", timeout=5000
     )
@@ -292,9 +309,14 @@ async def main() -> None:
         await build_route(page)
         out["alternatesPresent"] = await page.evaluate(
             "() => (window.agenticMaps[0].routes[0].alternates || []).length")
+        # Nav entry: the quiet "Simulieren" link is visible with its test
+        # tooltip, and the old prominent Start pill no longer exists at all.
         out["startVisible"] = await page.evaluate(
-            "() => { const el = document.getElementById('btn-nav-start');"
-            " return el.offsetParent !== null; }")
+            "() => { const el = document.getElementById('btn-nav-simulate');"
+            " return el.offsetParent !== null && !el.hidden"
+            " && el.title === 'Route simulieren (Testfunktion)'"
+            " && !document.getElementById('btn-nav-start')"
+            " && !document.getElementById('nav-start-row'); }")
 
         # ---- FIX 1: theme switch redraws the route within 500 ms ----------
         # Fresh profile: theme 'auto' (headless = light). Click 1 -> hell
@@ -1094,7 +1116,12 @@ async def main() -> None:
             "() => localStorage.removeItem('am-maps-navsim-collapsed')")
         await page.set_viewport_size({"width": 700, "height": 900})
         await page.wait_for_timeout(400)
-        await start_nav(page)
+        # Mobile: no "Simulieren" in the route panel — the dev panel's
+        # Simulation section is the entry (and must keep working).
+        out["simCollapse"]["mobileEntryHidden"] = await page.evaluate(
+            "() => getComputedStyle(document.getElementById("
+            "'btn-nav-simulate')).display === 'none'")
+        await start_nav_via_dev(page)
         out["simCollapse"]["narrowInitial"] = await page.evaluate(
             "() => document.getElementById('nav-sim').classList.contains('collapsed')")
         await page.screenshot(path=f"{SCRATCH}/pw-navigation-narrow.png")
@@ -1105,6 +1132,11 @@ async def main() -> None:
         await page.evaluate(
             "() => localStorage.removeItem('am-maps-navsim-collapsed')")
         await page.wait_for_timeout(600)
+        # start_nav_via_dev left developer mode OFF (the dev-nav handler
+        # closes the workbench before starting); the later phases expect
+        # the panel standing again.
+        await page.click("#btn-dev")
+        await page.wait_for_selector("#dev.open", timeout=5000)
 
         # ---- dark theme nav (screenshot both looks) -----------------------------
         await page.click("#btn-theme")                 # auto -> hell
@@ -1442,6 +1474,7 @@ async def main() -> None:
     sim_collapse_ok = (
         sc["collapsed"] and sc["bodyHidden"] and sc["stored"] == "1"
         and sc["titleStillShown"] and sc["reopened"] and sc["narrowInitial"]
+        and sc["mobileEntryHidden"]
         # Obvious affordance: whole title row clickable (pointer + spans the
         # card) with an explicit − / + sign …
         and sc["affordance"]["cursor"] == "pointer"

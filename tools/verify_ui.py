@@ -284,11 +284,40 @@ async def main():
             endValue: document.querySelector('#stops-list .route-row:nth-child(2) input').value,
             result: document.getElementById('route-result').textContent.slice(0, 80),
             suggestClosed: !document.getElementById('stop-suggest').classList.contains('open'),
-            navStart: document.getElementById('nav-start-row').classList.contains('open'),
+            navStart: !document.getElementById('btn-nav-simulate').hidden
+              && !document.getElementById('btn-nav-start'),
         })""")
         r = out["routed"]
         checks["stopPickRoutes"] = (bool(r["endValue"]) and "min" in r["result"]
             and r["suggestClosed"] and r["navStart"])
+        await page.screenshot(path=f"{SCRATCH}/pw-ui-route-simulate.png",
+                              clip={"x": 0, "y": 0, "width": 420, "height": 640})
+
+        # "Simulieren" is desktop-only: on a mobile viewport the link is
+        # gone entirely — the dev panel's Simulation section is the path.
+        await page.set_viewport_size({"width": 700, "height": 900})
+        await page.wait_for_timeout(300)
+        out["simulateMobile"] = await page.evaluate(
+            "() => getComputedStyle(document.getElementById('btn-nav-simulate'))"
+            ".display")
+        checks["simulateHiddenOnMobile"] = out["simulateMobile"] == "none"
+        await page.set_viewport_size({"width": 1400, "height": 900})
+        await page.wait_for_timeout(300)
+
+        # The dev panel's nav entry still drives the same simulation.
+        await page.click("#btn-dev")
+        await page.wait_for_selector("#dev.open", state="visible", timeout=5000)
+        await page.evaluate(
+            "() => document.querySelector('[data-section=simulation]')"
+            ".setAttribute('open', '')")
+        await page.click("#dev-nav")
+        await page.wait_for_function(
+            "() => document.body.classList.contains('nav-mode')", timeout=8000)
+        out["devNavEnters"] = True
+        await page.click("#nav-exit")
+        await page.wait_for_function(
+            "() => !document.body.classList.contains('nav-mode')", timeout=8000)
+        checks["devNavSimulationWorks"] = out["devNavEnters"]
 
         # the context menu must keep working during an active route
         await open_menu(page, 1000, 300)

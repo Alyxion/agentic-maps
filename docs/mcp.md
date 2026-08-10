@@ -233,7 +233,7 @@ AGENTIC_MAPS_ROUTING_BACKEND=osrm python -m agentic_maps.devserver --port 8095
 
 Any streamable-HTTP MCP client connects to `http://127.0.0.1:8095/mcp`.
 Live end-to-end verification against a running server:
-`python tools/verify_mcp.py --url http://127.0.0.1:8195/mcp`.
+`python tools/verify_mcp.py --url http://127.0.0.1:8095/mcp`.
 
 **Remote use** follows the established pattern: put a cloudflared tunnel in
 front of `/mcp` and hand the tunnel URL to the remote MCP client — the

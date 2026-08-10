@@ -70,7 +70,7 @@ import statistics
 import sys
 import tempfile
 
-from PIL import Image
+from PIL import Image, ImageChops
 from playwright.async_api import async_playwright
 
 BASE = os.environ.get("AGENTIC_MAPS_VERIFY_BASE", "http://127.0.0.1:8195")
@@ -309,6 +309,126 @@ async def biome_pass(page, view: str) -> dict:
             "saharaVal": round(v, 3)}
 
 
+TILE_COVER = """() => {
+  const m = window.agenticMaps[0].map;
+  const out = {};
+  const managers = m.style.tileManagers || {};
+  for (const key of Object.keys(managers)) {
+    const tm = managers[key];
+    const hist = {};
+    for (const id of (tm.getRenderableIds ? tm.getRenderableIds() : [])) {
+      const t = tm.getTileByID ? tm.getTileByID(id) : null;
+      const z = t && t.tileID ? t.tileID.canonical.z : null;
+      if (z !== null) hist[z] = (hist[z] || 0) + 1;
+    }
+    out[key] = hist;
+  }
+  return out;
+}"""
+
+# Previous minor-road width at z16.5 (the frozen table's exp-1.6 curve
+# between the z15 and z17 anchors: 2 + 4.5 * (1.6**1.5 - 1) / (1.6**2 - 1)).
+# The close-zoom pass must at least DOUBLE it — hardcoded so a silent
+# re-narrowing fails loudly.
+OLD_MINOR_WIDTH_Z165 = 4.95
+
+
+def _eval_zoom_interpolation(expression, zoom: float) -> float:
+    """Numeric value of ['interpolate', ['exponential', b]|['linear'], ['zoom'], ...]."""
+    kind = expression[1]
+    base = kind[1] if kind[0] == "exponential" else 1.0
+    stops = expression[3:]
+    anchors = [(stops[i], stops[i + 1]) for i in range(0, len(stops), 2)]
+    if zoom <= anchors[0][0]:
+        return anchors[0][1]
+    for (z0, v0), (z1, v1) in zip(anchors, anchors[1:]):
+        if zoom <= z1:
+            if base == 1.0:
+                t = (zoom - z0) / (z1 - z0)
+            else:
+                t = (base ** (zoom - z0) - 1) / (base ** (z1 - z0) - 1)
+            return v0 + t * (v1 - v0)
+    return anchors[-1][1]
+
+
+async def render_quality_pass(page) -> dict:
+    """Pitched-view LOD, close-zoom widths and the 3D-building fixes."""
+    out: dict = {}
+
+    # -- LOD: the Hamburg-harbor reference view (owner's screenshots) -----
+    await page.goto("about:blank")
+    await page.goto(f"{BASE}/#@53.54,10.0,16z&view=hybrid&lang=de",
+                    wait_until="load")
+    await settle(page)
+    out["flatCover"] = await page.evaluate(TILE_COVER)
+    await page.evaluate(
+        "() => window.agenticMaps[0].map.jumpTo({ pitch: 60 })")
+    await settle(page)
+    out["pitchedCover"] = await page.evaluate(TILE_COVER)
+    await page.screenshot(path=f"{SCRATCH}/pw-carto-lod-harbor.png")
+
+    # -- LOD scoping: the "weird grid" view. Coarse VECTOR tiles at a close
+    # display zoom drew simplified far-zoom roads as ruler-straight white
+    # hairlines; the streets source must stay single-zoom while pitched.
+    await page.evaluate(
+        "() => window.agenticMaps[0].map.jumpTo("
+        "{ center: [10.02, 53.52], zoom: 14.5, pitch: 60 })")
+    await settle(page)
+    out["gridViewCover"] = await page.evaluate(TILE_COVER)
+    await page.screenshot(path=f"{SCRATCH}/pw-carto-lod-gridview.png")
+
+    # -- close-zoom width tables (map-light; map-dark shares them) --------
+    await page.goto("about:blank")
+    await page.goto(f"{BASE}/#@53.55,10.0,16.5z&view=map-light&lang=de",
+                    wait_until="load")
+    await settle(page)
+    out["minorWidthExpr"] = await page.evaluate(
+        "() => window.agenticMaps[0].map.getPaintProperty("
+        "'roads_minor', 'line-width')")
+    out["minorGapExpr"] = await page.evaluate(
+        "() => window.agenticMaps[0].map.getPaintProperty("
+        "'roads_minor_casing', 'line-gap-width')")
+
+    # -- 3D buildings at the giant-box / ground-shimmer view --------------
+    await page.goto("about:blank")
+    await page.goto(f"{BASE}/#@53.535,10.02,16.2z&view=map-light&lang=de",
+                    wait_until="load")
+    await settle(page)
+    await page.evaluate(
+        "() => window.agenticMaps[0].map.jumpTo({ pitch: 60, bearing: 20 })")
+    await settle(page)
+    out["buildings"] = await page.evaluate("""() => {
+      const m = window.agenticMaps[0].map;
+      return {
+        filter: JSON.stringify(m.getFilter('buildings-3d')),
+        opacity: m.getPaintProperty('buildings-3d', 'fill-extrusion-opacity'),
+        base: JSON.stringify(
+          m.getPaintProperty('buildings-3d', 'fill-extrusion-base')),
+        height: JSON.stringify(
+          m.getPaintProperty('buildings-3d', 'fill-extrusion-height')),
+        rendered: m.queryRenderedFeatures({ layers: ['buildings-3d'] }).length,
+      };
+    }""")
+    # Flicker pair: two frames, IDENTICAL camera, explicit repaint between.
+    frame_a = f"{SCRATCH}/pw-carto-bldg-frame-a.png"
+    frame_b = f"{SCRATCH}/pw-carto-bldg-frame-b.png"
+    await page.screenshot(path=frame_a)
+    await page.evaluate(
+        "() => new Promise((done) => {"
+        " const m = window.agenticMaps[0].map;"
+        " m.once('render', () => requestAnimationFrame(() => done()));"
+        " m.triggerRepaint(); })")
+    await page.screenshot(path=frame_b)
+    image_a = Image.open(frame_a).convert("RGB")
+    image_b = Image.open(frame_b).convert("RGB")
+    box = (0, 100, image_a.width, image_a.height - 80)
+    diff = ImageChops.difference(image_a.crop(box), image_b.crop(box))
+    changed = sum(1 for p in diff.getdata() if max(p) > 8)
+    out["flicker"] = {"changedPixels": changed,
+                      "totalPixels": diff.width * diff.height}
+    return out
+
+
 async def main() -> None:
     errors: list[str] = []
     launch_kwargs = {}
@@ -331,6 +451,7 @@ async def main() -> None:
         themes = [await theme_pass(page, view)
                   for view in ("map-light", "map-dark")]
         composition = await composition_pass(page)
+        quality = await render_quality_pass(page)
         globes = [await globe_pass(page, view)
                   for view in ("map-light", "map-dark")]
         roadwebs = [await roadweb_pass(page, view)
@@ -340,7 +461,7 @@ async def main() -> None:
         await browser.close()
 
     out = {"themes": themes, "composition": composition, "globes": globes,
-           "roadwebs": roadwebs, "biomes": biomes,
+           "roadwebs": roadwebs, "biomes": biomes, "quality": quality,
            "consoleErrors": errors[:8]}
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
@@ -396,7 +517,50 @@ async def main() -> None:
 
     by_view = {g["view"]: g for g in globes}
     globe_ok = all(globe_continuity_ok(g) for g in globes)
+
+    q = quality
+    ortho_pitched = {int(z): n for z, n in
+                     q["pitchedCover"].get("ortho", {}).items()}
+    ortho_flat = {int(z): n for z, n in
+                  q["flatCover"].get("ortho", {}).items()}
+    streets_grid = {int(z): n for z, n in
+                    q["gridViewCover"].get("streets", {}).items()}
+    new_minor_width = _eval_zoom_interpolation(q["minorWidthExpr"], 16.5)
+    b = q["buildings"]
+    flicker_share = q["flicker"]["changedPixels"] / q["flicker"]["totalPixels"]
     verdict = {
+        # Pitched reference view: a real pyramid — at least two distinct
+        # aerial zooms, tiles at least two levels coarser than the nominal
+        # z17 carrying the far field; the flat cover stays single-zoom.
+        "lod_pitched_ok": (
+            len(ortho_pitched) >= 2
+            and min(ortho_pitched) <= max(ortho_pitched) - 2
+            and sum(n for z, n in ortho_pitched.items()
+                    if z < max(ortho_pitched)) >= 6
+        ),
+        "lod_flat_unchanged_ok": list(ortho_flat.keys()) == [17],
+        # The grid regression: the vector streets must stay SINGLE-zoom at
+        # the pitched close view — a coarse vector tile there re-draws the
+        # ruler-straight white diagonals.
+        "lod_vector_pinned_ok": len(streets_grid) == 1,
+        # Close-zoom band: minor roads at z16.5 at least doubled, casing
+        # gap in lockstep with the road width.
+        "close_width_ok": (
+            new_minor_width >= 2 * OLD_MINOR_WIDTH_Z165
+            and q["minorGapExpr"] == q["minorWidthExpr"]
+        ),
+        # 3D buildings: building class only (no coplanar building_part
+        # double-render), epsilon base, clamped height, opaque when up.
+        "buildings_zfight_ok": (
+            "building_part" not in b["filter"] and '"building"' in b["filter"]
+            and b["opacity"] == 1
+            and '"max"' in b["base"] and "0.1" in b["base"]
+            and '"min"' in b["height"] and "400" in b["height"]
+            and b["rendered"] > 0
+        ),
+        # Two frames, identical camera: per-pixel diff over the building
+        # area of the stage stays ≈ 0.
+        "buildings_flicker_ok": flicker_share < 0.001,
         **{t["view"] + "_ok": theme_ok(t) for t in themes},
         "hybrid_untouched_ok": (
             STOCK_WATER in comp["hybrid"]["water"]

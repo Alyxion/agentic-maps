@@ -133,6 +133,11 @@
   const ROADS_OVER_MINZOOM = 7;
   const SHIELD_MINZOOM = 9;
 
+  // Pitch above which the tile pyramid goes variable-zoom (full-res near,
+  // coarser far) — the vendored engine's own gate sits at 60°, above the
+  // 55–62° the 3D/nav cameras use. See _applyPitchLod for the ground truth.
+  const PITCH_LOD_MIN_PITCH = 45;
+
   // Template URLs keep literal {z}/{x}/{y}/{fontstack}/{range} tokens —
   // new URL() would percent-encode the braces and invalidate the style.
   // Absolute stays absolute — for ANY scheme, not just http/data. A sealed
@@ -229,10 +234,15 @@
           7, ['match', ['get', 'kind'], 'highway', 0.55, 0.0],
           10, ['match', ['get', 'kind'], 'highway', 0.55, 'major_road', 0.3, 0.0],
           13, ['match', ['get', 'kind'], 'highway', 0.5, 'major_road', 0.4, 0.25]],
+        // The z15 anchors are the OLD curve's own interpolated values (the
+        // ≤z15 rendering is untouched); from there the white net widens to
+        // match the aerial streets underneath — minors ~2×, mains ~+50% in
+        // the z15.5–18 band, in lockstep with the map modes' width tables.
         'line-width': ['interpolate', ['exponential', 1.6], ['zoom'],
           7, ['match', ['get', 'kind'], 'highway', 1.1, 0.5],
           11, ['match', ['get', 'kind'], 'highway', 2, 'major_road', 1.2, 0.6],
-          17, ['match', ['get', 'kind'], 'highway', 12, 'major_road', 8, 5]],
+          15, ['match', ['get', 'kind'], 'highway', 5.52, 'major_road', 3.59, 2.15],
+          17, ['match', ['get', 'kind'], 'highway', 19, 'major_road', 13, 11]],
       },
     };
   }
@@ -287,6 +297,11 @@
         attributionControl: false,
         interactive: standalone || !!this.spec.interactive,
       });
+      // Pitched-view tile LOD: activated here and re-applied after every
+      // style swap (setStyle builds fresh Source objects, and the per-source
+      // tile-zoom functions live on them).
+      this._applyPitchLod();
+      this.map.on('style.load', () => this._applyPitchLod());
       // Record which style is standing, so a later setView() to the SAME view
       // is a true no-op. Without this the first one always rebuilt the style
       // (the key started undefined) — a second full style build, and a second
@@ -357,6 +372,64 @@
         for (const route of this.spec.routes || []) this.addRoute(route);
         this._applyVisibility();
       });
+    }
+
+    /** MapLibre v5's pitched-view LOD, activated — the vendored default
+     *  leaves it dormant for every camera this app uses.
+     *
+     *  Ground truth in the vendored bundle (v5.24.0): per-tile variable zoom
+     *  only engages when the mercator covering-tiles provider's
+     *  `allowVariableZoom` answers true — `terrain || pitch > clamp(78.5 -
+     *  fov/2, 0, 60)`, which with the default fov (~36.87°) is exactly 60°,
+     *  ABOVE the 55–62° the 3D/nav views actually use. Measured result: a
+     *  pitch-60 z16 Hamburg view covered the stage with 96 uniform z17
+     *  aerial tiles — the fine-gridded horizon and the dark out-of-coverage
+     *  seam of the owner's screenshots.
+     *
+     *  Two moves, both bounded and revertible (tools/probe_lod.py):
+     *  - The gate: `allowVariableZoom` is patched once, prototype-level, to
+     *    also answer true past PITCH_LOD_MIN_PITCH. The stock predicate
+     *    runs first, so terrain and wide-fov setups keep their behavior.
+     *  - The sources: the unified z0–19 aerial raster gets the engine's own
+     *    LOD profile via the public setSourceTileLodParams (the bundle's
+     *    default createCalculateTileZoomFunction(9.314, 3)); measured cover
+     *    at the reference view is a z15–z18 pyramid instead of z17×96.
+     *    EVERY other source is pinned to the uniform center zoom: a coarse
+     *    VECTOR tile at a close display zoom draws its simplified far-zoom
+     *    road geometry as ruler-straight white hairlines across the view
+     *    (the "weird grid" reproduced at 53.52, 10.02, pitch 60) — the
+     *    aerial pyramid is the point, the street net must never coarsen.
+     *
+     *  Sealed/offline payloads keep the per-band ortho+world pair whose
+     *  ortho has no coarse rungs (minzoom 13) — no LOD there, and the
+     *  pinning still protects the vector net past 60° pitch. Everything is
+     *  wrapped in try/catch: if a vendor bump moves these internals the map
+     *  degrades to stock covering behavior instead of breaking.
+     */
+    _applyPitchLod() {
+      try {
+        const proto = Object.getPrototypeOf(
+          this.map.transform.getCoveringTilesDetailsProvider());
+        if (!proto.__amStockAllowVariableZoom) {
+          proto.__amStockAllowVariableZoom = proto.allowVariableZoom;
+          const stock = proto.__amStockAllowVariableZoom;
+          proto.allowVariableZoom = function (transform, options) {
+            return stock.call(this, transform, options)
+              || transform.pitch > PITCH_LOD_MIN_PITCH;
+          };
+        }
+        const unified = !!this.payload.aerial_url_template
+          && (this.view === 'hybrid' || this.view === 'satellite');
+        const managers = this.map.style.tileManagers || {};
+        for (const key of Object.keys(managers)) {
+          if (key === 'ortho' && unified) continue;
+          const source = managers[key].getSource();
+          if (source) source.calculateTileZoom = (requestedZoom) => requestedZoom;
+        }
+        if (unified && this.map.getSource('ortho')) {
+          this.map.setSourceTileLodParams(9.314, 3, 'ortho');
+        }
+      } catch (e) { /* vendored internals moved — stock covering stands */ }
     }
 
     // -- style ---------------------------------------------------------
@@ -674,12 +747,22 @@
       // tunnels ride the same tables, and every casing's line-gap-width
       // stays in lockstep with its road's line-width.
       const exp16 = (stops) => ['interpolate', ['exponential', 1.6], ['zoom'], ...stops];
+      // Widened through the z15.5–18 band against the aerial ground truth
+      // (owner: side streets "silly small" next to the imagery underneath):
+      // minor/service streets ~2× their previous width there, the mains
+      // (highway/major/link) ~+50%. Every anchor at or below z15 and every
+      // z20 top is EXACTLY the previous curve — the mid-zoom cartography
+      // and the z20 maximums are frozen by their own assertions. The z15
+      // anchors added to minor_service (1.32) and link (2.39) are the OLD
+      // curve's own interpolated values at z15: exponential interpolation
+      // is self-similar, so splitting a segment at its exact value leaves
+      // everything below byte-identical.
       const CLOSE_ROAD_WIDTHS = {
-        minor: [11, 0, 12.5, 0.5, 15, 2, 17, 6.5, 18, 14, 19, 26, 20, 46],
-        minor_service: [13, 0, 17, 4.7, 18, 11, 19, 20, 20, 34],
-        major: [6, 0, 12, 1.6, 15, 3, 17, 8, 18, 17, 19, 30, 20, 52],
-        highway: [3, 0, 6, 1.1, 12, 1.6, 15, 5, 17, 10, 18, 20, 19, 34, 20, 58],
-        link: [13, 0, 13.5, 1, 17, 6.7, 18, 14, 19, 24, 20, 42],
+        minor: [11, 0, 12.5, 0.5, 15, 2, 16, 7.5, 17, 13.5, 18, 28, 19, 38, 20, 46],
+        minor_service: [13, 0, 15, 1.32, 16, 5.5, 17, 9.4, 18, 22, 19, 29, 20, 34],
+        major: [6, 0, 12, 1.6, 15, 3, 16, 7.2, 17, 12.5, 18, 25, 19, 38, 20, 52],
+        highway: [3, 0, 6, 1.1, 12, 1.6, 15, 5, 16, 9.5, 17, 16, 18, 30, 19, 44, 20, 58],
+        link: [13, 0, 13.5, 1, 15, 2.39, 16, 5.7, 17, 10.5, 18, 21, 19, 32, 20, 42],
       };
       // Casings whose stroke should thicken a touch alongside (a fixed 1 px
       // outline around a 40 px surface reads as a rendering artifact).
@@ -976,19 +1059,33 @@
       // most saturated thing there must stay the data.
       const low = canvas ? '#c9c8c5' : dark ? '#2c3644' : '#d9d5cc';
       const high = canvas ? '#d6d5d2' : dark ? '#415062' : '#efede7';
-      const height = ['coalesce', ['get', 'height'], 8];
+      // Clamped: a mis-tagged height (hundreds of metres on a shed) must
+      // render as a tall building, not as a monolith over the whole quarter.
+      const height = ['min', ['coalesce', ['get', 'height'], 8], 400];
       const firstSymbol = layers.findIndex((l) => l.type === 'symbol');
       layers.splice(firstSymbol === -1 ? layers.length : firstSymbol, 0, {
         id: 'buildings-3d', type: 'fill-extrusion', source: 'streets',
         'source-layer': 'buildings', minzoom: 15,
+        // Buildings ONLY. The tiles' `buildings` source-layer also carries
+        // `building_part` (OSM 3D micro-mapping: roof volumes, and whole
+        // planned towers — a 100 m `building_part` at the Elbtower site
+        // rendered as a giant translucent box) and `address` points. Every
+        // part shares its footprint with its parent building, so drawing
+        // both classes put two coplanar walls in the depth buffer — the
+        // z-fight shimmer the owner reported.
+        filter: ['==', ['get', 'kind'], 'building'],
         paint: {
           'fill-extrusion-color': ['interpolate', ['linear'], height, 4, low, 80, high],
           // Grown in over ~z15–15.7 so the skyline rises as you approach
           // instead of popping in as a wall of prisms.
           'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'],
             15, 0, 15.7, height],
+          // Base lifted an epsilon off the ground: 2609 of 2661 probed
+          // features carry no min_height, and a base polygon exactly
+          // coplanar with the ground plane shimmers per-frame at pitch.
+          // 0.1 m is far below anything a viewer could read as floating.
           'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'],
-            15, 0, 15.7, ['coalesce', ['get', 'min_height'], 0]],
+            15, 0, 15.7, ['max', ['coalesce', ['get', 'min_height'], 0], 0.1]],
           'fill-extrusion-opacity': 0,     // pitch > 0 fades it in
           'fill-extrusion-vertical-gradient': true,
         },
@@ -999,8 +1096,14 @@
      *  cartography when looking straight down. Paint-only — cheap, animated
      *  by MapLibre's own opacity transition. */
     _syncBuildings() {
-      const target = this.map.getPitch() > 0.5
-        ? (this.view === 'hybrid' ? 0.7 : 0.92) : 0;
+      // Fully opaque when up: any sub-1 opacity routes fill-extrusion
+      // through MapLibre's translucent two-pass path (verified in the
+      // vendored bundle: `1 !== opacity` forces the depth-prepass branch),
+      // stacks every wall ghost-on-ghost and washes the city into fog
+      // slabs over imagery. Opaque + the vertical gradient reads clean in
+      // both hybrid and map modes; the fade-in transition still animates
+      // through the translucent path, ending on the depth-correct one.
+      const target = this.map.getPitch() > 0.5 ? 1 : 0;
       try {
         if (!this.map.getLayer('buildings-3d')) return;
         // Compared against the LIVE paint value, not a cached flag: a style

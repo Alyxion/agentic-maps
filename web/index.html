@@ -666,15 +666,13 @@
   .am-nav-arrow circle { fill: var(--nav-marker-ring); }
   .am-nav-arrow path { fill: var(--nav-marker); }
 
-  /* Start in the directions panel — only while a route stands. OUR deep
-     navy, not Google's #1a73e8: nav's identity starts at its entry point. */
-  #nav-start-row { display: none; margin-top: 10px; }
-  #nav-start-row.open { display: block; }
-  #btn-nav-start { background: var(--nav-start); display: inline-flex;
-    align-items: center; gap: 8px; font-size: 14px; font-weight: 600;
-    padding: 10px 22px; border-radius: 999px; }
-  #btn-nav-start:hover { background: var(--nav-start-hover); }
-  #btn-nav-start .ph-icon { width: 15px; height: 15px; }
+  /* "Simulieren" in the directions panel — only while a route stands.
+     Deliberately QUIET (the "+ Ziel hinzufügen" link pattern, not a pill):
+     driving the route is a test function of this authoring surface, not
+     the product's call to action. On mobile there is no entry at all —
+     the dev panel's Simulation section stays the path there. */
+  #btn-nav-simulate { padding: 0; }
+  @media (max-width: 760px) { #btn-nav-simulate { display: none !important; } }
 
   /* -- status toast -------------------------------------------------- */
   #status {
@@ -798,6 +796,10 @@
       <div class="route-actions">
         <button class="link-btn" id="btn-route-options" style="padding:0">Optionen</button>
         <span style="flex:1"></span>
+        <!-- Test entry into navigation mode; hidden until a route stands,
+             absent on mobile (the dev panel's Simulation section remains). -->
+        <button class="link-btn" id="btn-nav-simulate"
+                title="Route simulieren (Testfunktion)" hidden>Simulieren</button>
       </div>
       <div id="route-options">
         <label class="opt"><input type="checkbox" id="avoid-motorway" value="motorway"> Autobahnen meiden</label>
@@ -812,11 +814,6 @@
         <div class="hint" id="options-note"></div>
       </div>
       <div id="route-result"></div>
-      <!-- Enter navigation mode: only shown while a route is drawn. -->
-      <div id="nav-start-row">
-        <button class="btn" id="btn-nav-start" title="Navigation starten">
-          <span class="ph-icon" data-ph="navigation-arrow"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l9 20-9-5.5L3 22z"/></svg></span>Start</button>
-      </div>
       <div id="route-steps"></div>
     </div>
     <!-- Stop-field autocomplete: one shared dropdown, positioned under the
@@ -2048,7 +2045,7 @@
     $('route-panel').classList.remove('open');
     $('route-result').classList.remove('open');
     $('route-steps').classList.remove('open');
-    $('nav-start-row').classList.remove('open');
+    $('btn-nav-simulate').hidden = true;
     resetTabTimes();
   }
 
@@ -2253,7 +2250,7 @@
         drawStopMarkers();
         $('route-result').classList.remove('open');
         $('route-steps').classList.remove('open');
-        $('nav-start-row').classList.remove('open');
+        $('btn-nav-simulate').hidden = true;
       }
       return;
     }
@@ -2325,8 +2322,9 @@
       + '<br><span class="sub">ohne Verkehrslage (freie Fahrt)</span>'
       + '<div id="route-alternates"></div>';
     $('route-result').classList.add('open');
-    // A drawn route can be driven: the blue Start enters navigation mode.
-    $('nav-start-row').classList.add('open');
+    // A drawn route can be driven: the quiet "Simulieren" link enters
+    // navigation mode (test function — same wiring the Start pill had).
+    $('btn-nav-simulate').hidden = false;
     renderAlternates(route);
     renderSteps(route);
   }
@@ -3193,7 +3191,7 @@
     },
   });
   window.agenticNav = navigation;   // the verify harness drives it directly
-  $('btn-nav-start').addEventListener('click', () => {
+  $('btn-nav-simulate').addEventListener('click', () => {
     if (!navigation.start()) status('Erst eine Route berechnen');
   });
   $('dev-nav').addEventListener('click', () => {
